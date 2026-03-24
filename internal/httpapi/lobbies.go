@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -60,6 +61,11 @@ type customConditionsRequest struct {
 	MissionName    string `json:"missionName"`
 	WeatherName    string `json:"weatherName"`
 	AtmosphereName string `json:"atmosphereName"`
+}
+
+type rankedResultRequest struct {
+	WinnerPlayerID int64 `json:"winnerPlayerId"`
+	IsDraw         bool  `json:"isDraw"`
 }
 
 func (a *api) createLobby(w http.ResponseWriter, r *http.Request) {
@@ -664,6 +670,142 @@ DO UPDATE SET experience = player_faction_experience.experience + 1
 	writeJSON(w, http.StatusOK, updatedLobby)
 }
 
+func (a *api) submitRankedResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	lobbyID, ok := parseLobbyActionID(r.URL.Path, "ranked-result")
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	authPlayerID, err := a.requirePlayer(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var req rankedResultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if !req.IsDraw && req.WinnerPlayerID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "winnerPlayerId is required for non-draw result"})
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to begin transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	var isRanked bool
+	var status string
+	var ratingApplied bool
+	if err := tx.QueryRow(`SELECT is_ranked, status, rating_applied FROM lobbies WHERE id = $1`, lobbyID).Scan(&isRanked, &status, &ratingApplied); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "lobby not found"})
+		return
+	}
+	if !isRanked {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "glicko is only for ranked lobbies"})
+		return
+	}
+	if ratingApplied {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rating already applied for this lobby"})
+		return
+	}
+	if status != "started" && status != "finished" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "match has not started yet"})
+		return
+	}
+
+	rows, err := tx.Query(`SELECT player_id FROM lobby_players WHERE lobby_id = $1 ORDER BY joined_at`, lobbyID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby players"})
+		return
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if scanErr := rows.Scan(&id); scanErr == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	if len(ids) != 2 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ranked result requires exactly 2 players"})
+		return
+	}
+	if authPlayerID != ids[0] && authPlayerID != ids[1] {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+
+	p1, p2 := ids[0], ids[1]
+	if !req.IsDraw && req.WinnerPlayerID != p1 && req.WinnerPlayerID != p2 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "winnerPlayerId must be one of lobby players"})
+		return
+	}
+
+	var r1, r2 int
+	var rd1, rd2 float64
+	if err := tx.QueryRow(`SELECT rating, rating_rd FROM players WHERE id = $1`, p1).Scan(&r1, &rd1); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load player ratings"})
+		return
+	}
+	if err := tx.QueryRow(`SELECT rating, rating_rd FROM players WHERE id = $1`, p2).Scan(&r2, &rd2); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load player ratings"})
+		return
+	}
+
+	s1, s2 := 0.5, 0.5
+	if !req.IsDraw {
+		if req.WinnerPlayerID == p1 {
+			s1, s2 = 1, 0
+		} else {
+			s1, s2 = 0, 1
+		}
+	}
+
+	newR1, newRD1 := glickoUpdate(float64(r1), rd1, float64(r2), rd2, s1)
+	newR2, newRD2 := glickoUpdate(float64(r2), rd2, float64(r1), rd1, s2)
+
+	if _, err := tx.Exec(`UPDATE players SET rating = $1, rating_rd = $2, updated_at = $3 WHERE id = $4`,
+		int(math.Round(newR1)), newRD1, now, p1); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update player rating"})
+		return
+	}
+	if _, err := tx.Exec(`UPDATE players SET rating = $1, rating_rd = $2, updated_at = $3 WHERE id = $4`,
+		int(math.Round(newR2)), newRD2, now, p2); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update player rating"})
+		return
+	}
+
+	_, _ = tx.Exec(`
+INSERT INTO rating_history (lobby_id, player_id, old_rating, new_rating, old_rd, new_rd, score, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8), ($1,$9,$10,$11,$12,$13,$14,$8)
+`, lobbyID, p1, r1, int(math.Round(newR1)), rd1, newRD1, s1, now, p2, r2, int(math.Round(newR2)), rd2, newRD2, s2)
+
+	_, _ = tx.Exec(`UPDATE lobbies SET rating_applied = TRUE, status = 'finished', finished_at = $1, updated_at = $1 WHERE id = $2`, now, lobbyID)
+
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit rating update"})
+		return
+	}
+
+	updatedLobby, err := a.getLobbyByID(lobbyID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
+		return
+	}
+	writeJSON(w, http.StatusOK, updatedLobby)
+}
+
 func parseLobbyActionID(path, action string) (int64, bool) {
 	p := strings.Trim(strings.TrimPrefix(path, "/lobbies/"), "/")
 	parts := strings.Split(p, "/")
@@ -684,4 +826,29 @@ func containsString(items []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func glickoUpdate(r, rd, oppR, oppRD, score float64) (float64, float64) {
+	const q = 0.005756462732485115 // ln(10)/400
+	rd = clampRD(rd)
+	oppRD = clampRD(oppRD)
+
+	g := 1 / math.Sqrt(1+((3*q*q*oppRD*oppRD)/(math.Pi*math.Pi)))
+	e := 1 / (1 + math.Pow(10, (-g*(r-oppR))/400))
+	d2 := 1 / (q*q*g*g*e*(1-e))
+	pre := 1/(rd*rd) + 1/d2
+	newRD := math.Sqrt(1 / pre)
+	newR := r + (q/pre)*g*(score-e)
+
+	return newR, clampRD(newRD)
+}
+
+func clampRD(rd float64) float64 {
+	if rd < 30 {
+		return 30
+	}
+	if rd > 350 {
+		return 350
+	}
+	return rd
 }

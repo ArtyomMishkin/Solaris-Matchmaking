@@ -25,6 +25,8 @@ type player struct {
 	Tournaments       []string `json:"tournaments"`
 	HobbyEvenings     []string `json:"hobbyEvenings"`
 	TotalExperience   int      `json:"totalExperience"`
+	Rating            int      `json:"rating"`
+	RatingRD          float64  `json:"ratingRd"`
 	OtherEvents       []string `json:"otherEvents"`
 	FactionExperience []factionExperience `json:"factionExperience"`
 	CollectionLink    string   `json:"collectionLink,omitempty"`
@@ -288,7 +290,7 @@ func (a *api) getPlayerByID(id int64) (player, error) {
 SELECT
 	id, full_name, nickname, city, contacts, preferred_location,
 	rank_title, rank_attested_at, factions, tournaments, hobby_evenings,
-	total_experience, other_events, collection_link, created_at, updated_at
+	total_experience, rating, rating_rd, other_events, collection_link, created_at, updated_at
 FROM players
 WHERE id = $1
 `, id).Scan(
@@ -304,6 +306,8 @@ WHERE id = $1
 		&tournamentsRaw,
 		&hobbyEveningsRaw,
 		&p.TotalExperience,
+		&p.Rating,
+		&p.RatingRD,
 		&otherEventsRaw,
 		&p.CollectionLink,
 		&p.CreatedAt,

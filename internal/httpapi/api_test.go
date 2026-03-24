@@ -749,3 +749,119 @@ VALUES
 		t.Fatalf("expected second faction Clan Wolf(5), got %s(%d)", out.Items[1].Faction, out.Items[1].Experience)
 	}
 }
+
+func TestRankedResultAppliesGlickoOnce(t *testing.T) {
+	database, handler := setupTestServer(t)
+
+	createPlayer := func(t *testing.T, nickname string) int64 {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{
+			"fullName":          "Player " + nickname,
+			"nickname":          nickname,
+			"city":              "Moscow",
+			"contacts":          "@"+nickname,
+			"preferredLocation": "Main Club",
+			"password":          "StrongPass123!",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/players", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create player expected %d, got %d, body=%s", http.StatusCreated, rec.Code, rec.Body.String())
+		}
+		var out struct{ ID int64 `json:"id"` }
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out.ID
+	}
+	loginToken := func(t *testing.T, nickname string) string {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"nickname": nickname, "password": "StrongPass123!"})
+		req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login expected %d, got %d", http.StatusOK, rec.Code)
+		}
+		var out struct{ Token string `json:"token"` }
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out.Token
+	}
+
+	p1 := createPlayer(t, "Rated1")
+	p2 := createPlayer(t, "Rated2")
+	p1Token := loginToken(t, "Rated1")
+	p2Token := loginToken(t, "Rated2")
+
+	createLobbyPayload, _ := json.Marshal(map[string]any{
+		"hostPlayerId": p1,
+		"faction":      "Clan Wolf",
+		"matchSize":    350,
+		"isRanked":     true,
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createLobbyPayload))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create ranked lobby expected %d, got %d, body=%s", http.StatusCreated, createRec.Code, createRec.Body.String())
+	}
+	var lobby struct{ ID int64 `json:"id"` }
+	_ = json.Unmarshal(createRec.Body.Bytes(), &lobby)
+
+	joinPayload, _ := json.Marshal(map[string]any{"playerId": p2, "faction": "Clan Jade Falcon"})
+	joinReq := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobby.ID, 10)+"/join", bytes.NewReader(joinPayload))
+	joinReq.Header.Set("Content-Type", "application/json")
+	joinReq.Header.Set("Authorization", "Bearer "+p2Token)
+	joinRec := httptest.NewRecorder()
+	handler.ServeHTTP(joinRec, joinReq)
+	if joinRec.Code != http.StatusOK {
+		t.Fatalf("join expected %d, got %d", http.StatusOK, joinRec.Code)
+	}
+
+	readyReq := func(playerID int64, token string) {
+		payload, _ := json.Marshal(map[string]any{"playerId": playerID})
+		req := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobby.ID, 10)+"/ready", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ready expected %d, got %d", http.StatusOK, rec.Code)
+		}
+	}
+	readyReq(p1, p1Token)
+	readyReq(p2, p2Token)
+
+	var oldR1, oldR2 int
+	_ = database.QueryRow(`SELECT rating FROM players WHERE id = $1`, p1).Scan(&oldR1)
+	_ = database.QueryRow(`SELECT rating FROM players WHERE id = $1`, p2).Scan(&oldR2)
+
+	resultPayload, _ := json.Marshal(map[string]any{"winnerPlayerId": p1, "isDraw": false})
+	resultReq := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobby.ID, 10)+"/ranked-result", bytes.NewReader(resultPayload))
+	resultReq.Header.Set("Content-Type", "application/json")
+	resultReq.Header.Set("Authorization", "Bearer "+p1Token)
+	resultRec := httptest.NewRecorder()
+	handler.ServeHTTP(resultRec, resultReq)
+	if resultRec.Code != http.StatusOK {
+		t.Fatalf("ranked-result expected %d, got %d, body=%s", http.StatusOK, resultRec.Code, resultRec.Body.String())
+	}
+
+	var newR1, newR2 int
+	_ = database.QueryRow(`SELECT rating FROM players WHERE id = $1`, p1).Scan(&newR1)
+	_ = database.QueryRow(`SELECT rating FROM players WHERE id = $1`, p2).Scan(&newR2)
+	if newR1 <= oldR1 {
+		t.Fatalf("expected winner rating increase: old=%d new=%d", oldR1, newR1)
+	}
+	if newR2 >= oldR2 {
+		t.Fatalf("expected loser rating decrease: old=%d new=%d", oldR2, newR2)
+	}
+
+	// second attempt must fail (rating_applied protection)
+	secondRec := httptest.NewRecorder()
+	handler.ServeHTTP(secondRec, resultReq)
+	if secondRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected second ranked-result to fail with %d, got %d", http.StatusBadRequest, secondRec.Code)
+	}
+}

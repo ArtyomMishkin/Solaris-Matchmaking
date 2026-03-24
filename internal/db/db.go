@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS players (
     tournaments TEXT NOT NULL DEFAULT '[]',
     hobby_evenings TEXT NOT NULL DEFAULT '[]',
     total_experience INTEGER NOT NULL DEFAULT 0,
+    rating INTEGER NOT NULL DEFAULT 1500,
+    rating_rd DOUBLE PRECISION NOT NULL DEFAULT 350,
     other_events TEXT NOT NULL DEFAULT '[]',
     collection_link TEXT,
 
@@ -51,6 +53,20 @@ CREATE TABLE IF NOT EXISTS players (
 `)
 	if err != nil {
 		return fmt.Errorf("migrate players table: %w", err)
+	}
+	_, err = database.Exec(`
+ALTER TABLE players
+ADD COLUMN IF NOT EXISTS rating INTEGER NOT NULL DEFAULT 1500;
+`)
+	if err != nil {
+		return fmt.Errorf("add players.rating: %w", err)
+	}
+	_, err = database.Exec(`
+ALTER TABLE players
+ADD COLUMN IF NOT EXISTS rating_rd DOUBLE PRECISION NOT NULL DEFAULT 350;
+`)
+	if err != nil {
+		return fmt.Errorf("add players.rating_rd: %w", err)
 	}
 
 	_, err = database.Exec(`
@@ -132,6 +148,13 @@ ADD COLUMN IF NOT EXISTS finished_at TEXT;
 	if err != nil {
 		return fmt.Errorf("add lobbies.finished_at: %w", err)
 	}
+	_, err = database.Exec(`
+ALTER TABLE lobbies
+ADD COLUMN IF NOT EXISTS rating_applied BOOLEAN NOT NULL DEFAULT FALSE;
+`)
+	if err != nil {
+		return fmt.Errorf("add lobbies.rating_applied: %w", err)
+	}
 
 	_, err = database.Exec(`
 CREATE TABLE IF NOT EXISTS lobbies_history (
@@ -189,6 +212,22 @@ CREATE TABLE IF NOT EXISTS player_faction_experience (
 `)
 	if err != nil {
 		return fmt.Errorf("migrate player_faction_experience table: %w", err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE IF NOT EXISTS rating_history (
+    id BIGSERIAL PRIMARY KEY,
+    lobby_id BIGINT NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE,
+    player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    old_rating INTEGER NOT NULL,
+    new_rating INTEGER NOT NULL,
+    old_rd DOUBLE PRECISION NOT NULL,
+    new_rd DOUBLE PRECISION NOT NULL,
+    score DOUBLE PRECISION NOT NULL,
+    created_at TEXT NOT NULL
+);
+`)
+	if err != nil {
+		return fmt.Errorf("migrate rating_history table: %w", err)
 	}
 	_, err = database.Exec(`
 INSERT INTO mission_conditions (mode_name, weather_name, description, is_active)
@@ -251,6 +290,12 @@ CREATE INDEX IF NOT EXISTS idx_player_faction_experience_player_id ON player_fac
 `)
 	if err != nil {
 		return fmt.Errorf("create player_faction_experience index: %w", err)
+	}
+	_, err = database.Exec(`
+CREATE INDEX IF NOT EXISTS idx_rating_history_player_id ON rating_history(player_id);
+`)
+	if err != nil {
+		return fmt.Errorf("create rating_history index: %w", err)
 	}
 
 	return nil

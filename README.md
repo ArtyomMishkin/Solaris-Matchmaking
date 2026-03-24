@@ -82,6 +82,8 @@ curl http://localhost:8080/health
 - `tournaments TEXT NOT NULL DEFAULT '[]'` - JSON-массив турниров
 - `hobby_evenings TEXT NOT NULL DEFAULT '[]'` - JSON-массив хобби-вечеров
 - `total_experience INTEGER NOT NULL DEFAULT 0` - Опыт
+- `rating INTEGER NOT NULL DEFAULT 1500` - рейтинг для ranked (Glicko)
+- `rating_rd DOUBLE PRECISION NOT NULL DEFAULT 350` - Rating Deviation (неопределенность рейтинга)
 - `other_events TEXT NOT NULL DEFAULT '[]'` - JSON-массив прочих ивентов
 - `collection_link TEXT` - Ссылка на коллекцию
 - `created_at TEXT NOT NULL`
@@ -168,6 +170,20 @@ curl http://localhost:8080/health
 - `joined_at TEXT NOT NULL`
 - `UNIQUE (lobby_id, player_id)`
 
+### 4.8 `rating_history`
+
+История изменения рейтинга по ranked-матчам.
+
+- `id BIGSERIAL PRIMARY KEY`
+- `lobby_id BIGINT NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE`
+- `player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE`
+- `old_rating INTEGER NOT NULL`
+- `new_rating INTEGER NOT NULL`
+- `old_rd DOUBLE PRECISION NOT NULL`
+- `new_rd DOUBLE PRECISION NOT NULL`
+- `score DOUBLE PRECISION NOT NULL` (`1`, `0`, `0.5`)
+- `created_at TEXT NOT NULL`
+
 ---
 
 ## 5) Безопасность и роли
@@ -231,6 +247,45 @@ go run ./cmd/admin list-admins
 - Для `isRanked=true`:
   - условия миссий не назначаются
   - random-condition вернет ошибку
+
+---
+
+## 7.1) Рейтинг ranked-матчей (Glicko-1)
+
+Для `isRanked=true` используется базовый Glicko-1 (2 игрока в матче):
+
+- стартовые значения игрока:
+  - `rating = 1500`
+  - `ratingRD = 350`
+- после ranked-результата обновляются:
+  - `players.rating`
+  - `players.rating_rd`
+- в `rating_history` пишется запись изменения.
+
+Результат для ranked подтверждается endpoint-ом:
+- `POST /lobbies/{id}/ranked-result`
+
+Тело:
+
+```json
+{
+  "winnerPlayerId": 1,
+  "isDraw": false
+}
+```
+
+Или ничья:
+
+```json
+{
+  "isDraw": true
+}
+```
+
+Ограничения:
+- только для ranked лобби
+- вызывать может только участник лобби (JWT)
+- расчет рейтинга можно применить только один раз (`rating_applied`)
 
 ---
 
@@ -432,6 +487,13 @@ Query-параметры:
 }
 ```
 
+### 8.14 Зафиксировать результат ranked-матча (Glicko)
+
+- `POST /lobbies/{id}/ranked-result`
+- Требуется JWT участника лобби (`Authorization: Bearer <token>`)
+- Работает только для `isRanked=true`
+- Рейтинг пересчитывается один раз
+
 ---
 
 ## 9) Админские API
@@ -517,6 +579,7 @@ go test ./...
 - flow non-MMR: `join -> conditions -> ready -> match-finished`
 - проверка раздельного опыта по фракциям
 - endpoint статистики по фракциям с сортировкой/пагинацией
+- ranked Glicko обновление рейтинга + защита от повторного применения
 - админский доступ и ограничения ролей
 - админские операции удаления/изменения
 

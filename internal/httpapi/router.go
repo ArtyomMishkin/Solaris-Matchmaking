@@ -95,6 +95,9 @@ func (a *api) lobbyByID(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(trimmed, "match-finished"):
 		a.markMatchFinished(w, r)
 		return
+	case strings.HasSuffix(trimmed, "ranked-result"):
+		a.submitRankedResult(w, r)
+		return
 	}
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
