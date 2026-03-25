@@ -613,32 +613,45 @@ func (a *api) markMatchFinished(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby players"})
 			return
 		}
-		defer rows.Close()
+		type lobbyMember struct {
+			playerID    int64
+			factionName string
+		}
+		var members []lobbyMember
 		for rows.Next() {
-			var playerID int64
-			var factionName string
-			if scanErr := rows.Scan(&playerID, &factionName); scanErr != nil {
+			var m lobbyMember
+			if scanErr := rows.Scan(&m.playerID, &m.factionName); scanErr != nil {
+				_ = rows.Close()
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read lobby players"})
 				return
 			}
+			members = append(members, m)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read lobby players"})
+			return
+		}
+		_ = rows.Close()
 
+		for _, m := range members {
 			var factionsRaw string
 			var totalExperience int
-			if err := tx.QueryRow(`SELECT factions, total_experience FROM players WHERE id = $1`, playerID).Scan(&factionsRaw, &totalExperience); err != nil {
+			if err := tx.QueryRow(`SELECT factions, total_experience FROM players WHERE id = $1`, m.playerID).Scan(&factionsRaw, &totalExperience); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load player progress"})
 				return
 			}
 			var factions []string
 			_ = json.Unmarshal([]byte(factionsRaw), &factions)
-			if !containsString(factions, factionName) {
-				factions = append(factions, factionName)
+			if !containsString(factions, m.factionName) {
+				factions = append(factions, m.factionName)
 			}
 			updatedFactions, _ := json.Marshal(factions)
 			_, err = tx.Exec(`
 UPDATE players
 SET total_experience = $1, factions = $2, updated_at = $3
 WHERE id = $4
-`, totalExperience+1, string(updatedFactions), now, playerID)
+`, totalExperience+1, string(updatedFactions), now, m.playerID)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update player progression"})
 				return
@@ -648,7 +661,7 @@ INSERT INTO player_faction_experience (player_id, faction_name, experience)
 VALUES ($1, $2, 1)
 ON CONFLICT (player_id, faction_name)
 DO UPDATE SET experience = player_faction_experience.experience + 1
-`, playerID, factionName)
+`, m.playerID, m.factionName)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update faction experience"})
 				return
