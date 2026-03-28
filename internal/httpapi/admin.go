@@ -15,8 +15,114 @@ type setRankRequest struct {
 	RankAttestedAt string `json:"rankAttestedAt"`
 }
 
+type adminPlayerSummary struct {
+	ID        int64  `json:"id"`
+	Nickname  string `json:"nickname"`
+	FullName  string `json:"fullName"`
+	City      string `json:"city"`
+	Role      string `json:"role"`
+	CreatedAt string `json:"createdAt"`
+}
+
 func (a *api) adminPlayersCollection(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	_, err := a.requireAdmin(r)
+	if err != nil {
+		if err.Error() == "forbidden" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	q := r.URL.Query()
+	sortBy := strings.ToLower(strings.TrimSpace(q.Get("sort")))
+	orderClause := "p.id ASC"
+	switch sortBy {
+	case "", "id_asc":
+		orderClause = "p.id ASC"
+	case "id_desc":
+		orderClause = "p.id DESC"
+	case "nickname_asc":
+		orderClause = "p.nickname ASC"
+	case "nickname_desc":
+		orderClause = "p.nickname DESC"
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid sort parameter"})
+		return
+	}
+
+	limit := 50
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		v, perr := strconv.Atoi(raw)
+		if perr != nil || v <= 0 || v > 200 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 200"})
+			return
+		}
+		limit = v
+	}
+
+	offset := 0
+	if raw := strings.TrimSpace(q.Get("offset")); raw != "" {
+		v, perr := strconv.Atoi(raw)
+		if perr != nil || v < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "offset must be >= 0"})
+			return
+		}
+		offset = v
+	}
+
+	var total int
+	if err := a.db.QueryRow(`
+SELECT COUNT(1) FROM players p
+JOIN player_credentials pc ON pc.player_id = p.id
+`).Scan(&total); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to count players"})
+		return
+	}
+
+	rows, err := a.db.Query(`
+SELECT p.id, p.nickname, p.full_name, p.city, pc.role, p.created_at
+FROM players p
+JOIN player_credentials pc ON pc.player_id = p.id
+ORDER BY `+orderClause+`
+LIMIT $1 OFFSET $2
+`, limit, offset)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load players"})
+		return
+	}
+	defer rows.Close()
+
+	var items []adminPlayerSummary
+	for rows.Next() {
+		var it adminPlayerSummary
+		if scanErr := rows.Scan(&it.ID, &it.Nickname, &it.FullName, &it.City, &it.Role, &it.CreatedAt); scanErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read players"})
+			return
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to iterate players"})
+		return
+	}
+
+	sortOut := sortBy
+	if sortOut == "" {
+		sortOut = "id_asc"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sort":   sortOut,
+		"limit":  limit,
+		"offset": offset,
+		"total":  total,
+		"items":  items,
+	})
 }
 
 func (a *api) adminPlayersSubresource(w http.ResponseWriter, r *http.Request) {

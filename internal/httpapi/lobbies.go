@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -11,30 +13,141 @@ import (
 	"time"
 )
 
+// lobby is the internal shape loaded from the DB (host faction duplicated on lobbies.faction).
 type lobby struct {
-	ID                 int64             `json:"id"`
-	HostPlayerID       int64             `json:"hostPlayerId"`
-	Faction            string            `json:"faction"`
-	MatchSize          int               `json:"matchSize"`
-	IsRanked           bool              `json:"isRanked"`
-	MissionConditionID *int64            `json:"missionConditionId,omitempty"`
-	MissionCondition   *missionCondition `json:"missionCondition,omitempty"`
-	CustomMissionName  string            `json:"customMissionName,omitempty"`
-	CustomWeatherName  string            `json:"customWeatherName,omitempty"`
-	CustomAtmosphere   string            `json:"customAtmosphereName,omitempty"`
-	Players            []lobbyPlayer     `json:"players,omitempty"`
-	Status             string            `json:"status"`
-	StartedAt          string            `json:"startedAt,omitempty"`
-	FinishedAt         string            `json:"finishedAt,omitempty"`
-	CreatedAt          string            `json:"createdAt"`
-	UpdatedAt          string            `json:"updatedAt"`
+	ID                 int64
+	HostPlayerID       int64
+	Faction            string
+	MatchSize          int
+	IsRanked           bool
+	MissionConditionID *int64
+	MissionCondition   *missionCondition
+	CustomMissionName  string
+	CustomWeatherName  string
+	CustomAtmosphere   string
+	Players            []lobbyPlayer
+	Status             string
+	StartedAt          string
+	FinishedAt         string
+	CreatedAt          string
+	UpdatedAt          string
 }
 
-type createLobbyRequest struct {
-	HostPlayerID int64  `json:"hostPlayerId"`
-	Faction      string `json:"faction"`
-	MatchSize    int    `json:"matchSize"`
-	IsRanked     bool   `json:"isRanked"`
+type lobbyMemberDTO struct {
+	PlayerID   int64  `json:"playerId"`
+	Faction    string `json:"faction"`
+	IsReady    bool   `json:"isReady"`
+	IsFinished bool   `json:"isFinished"`
+	JoinedAt   string `json:"joinedAt"`
+}
+
+func playerSlotKey(playerID int64) string {
+	return fmt.Sprintf("player%d", playerID)
+}
+
+func factionFromPlayerSlot(raw map[string]json.RawMessage, playerID int64) (string, error) {
+	key := playerSlotKey(playerID)
+	slotRaw, ok := raw[key]
+	if !ok {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	var slot struct {
+		Faction string `json:"faction"`
+	}
+	if err := json.Unmarshal(slotRaw, &slot); err != nil {
+		return "", fmt.Errorf("invalid %s object", key)
+	}
+	f := strings.TrimSpace(slot.Faction)
+	if f == "" {
+		return "", fmt.Errorf("%s.faction is required", key)
+	}
+	return f, nil
+}
+
+func validateCreateLobbyKeys(raw map[string]json.RawMessage, allowedSlot string) error {
+	for k := range raw {
+		switch k {
+		case "hostPlayerId", "matchSize", "isRanked":
+			continue
+		default:
+			if strings.HasPrefix(k, "player") {
+				if k != allowedSlot {
+					return fmt.Errorf("unexpected field %q", k)
+				}
+				continue
+			}
+			return fmt.Errorf("unknown field %q", k)
+		}
+	}
+	return nil
+}
+
+func validateJoinLobbyKeys(raw map[string]json.RawMessage, allowedSlot string) error {
+	for k := range raw {
+		if k == "playerId" {
+			continue
+		}
+		if strings.HasPrefix(k, "player") {
+			if k != allowedSlot {
+				return fmt.Errorf("unexpected field %q", k)
+			}
+			continue
+		}
+		return fmt.Errorf("unknown field %q", k)
+	}
+	return nil
+}
+
+// lobbyToJSON builds the wire object: each participant is under player{theirId}.
+func lobbyToJSON(l lobby) map[string]any {
+	out := map[string]any{
+		"id":           l.ID,
+		"hostPlayerId": l.HostPlayerID,
+		"matchSize":    l.MatchSize,
+		"isRanked":     l.IsRanked,
+		"status":       l.Status,
+		"createdAt":    l.CreatedAt,
+		"updatedAt":    l.UpdatedAt,
+	}
+	if l.MissionConditionID != nil {
+		out["missionConditionId"] = *l.MissionConditionID
+	}
+	if l.MissionCondition != nil {
+		out["missionCondition"] = l.MissionCondition
+	}
+	if l.CustomMissionName != "" {
+		out["customMissionName"] = l.CustomMissionName
+	}
+	if l.CustomWeatherName != "" {
+		out["customWeatherName"] = l.CustomWeatherName
+	}
+	if l.CustomAtmosphere != "" {
+		out["customAtmosphereName"] = l.CustomAtmosphere
+	}
+	if l.StartedAt != "" {
+		out["startedAt"] = l.StartedAt
+	}
+	if l.FinishedAt != "" {
+		out["finishedAt"] = l.FinishedAt
+	}
+
+	hostSeen := false
+	for i := range l.Players {
+		p := l.Players[i]
+		out[playerSlotKey(p.PlayerID)] = lobbyMemberDTO{
+			PlayerID: p.PlayerID, Faction: p.Faction, IsReady: p.IsReady,
+			IsFinished: p.IsFinished, JoinedAt: p.JoinedAt,
+		}
+		if p.PlayerID == l.HostPlayerID {
+			hostSeen = true
+		}
+	}
+	if !hostSeen {
+		out[playerSlotKey(l.HostPlayerID)] = lobbyMemberDTO{
+			PlayerID: l.HostPlayerID, Faction: l.Faction, IsReady: false, IsFinished: false, JoinedAt: "",
+		}
+	}
+	return out
 }
 
 type missionCondition struct {
@@ -45,16 +158,11 @@ type missionCondition struct {
 }
 
 type lobbyPlayer struct {
-	PlayerID   int64  `json:"playerId"`
-	Faction    string `json:"faction"`
-	IsReady    bool   `json:"isReady"`
-	IsFinished bool   `json:"isFinished"`
-	JoinedAt   string `json:"joinedAt"`
-}
-
-type joinLobbyRequest struct {
-	PlayerID int64  `json:"playerId"`
-	Faction  string `json:"faction"`
+	PlayerID   int64
+	Faction    string
+	IsReady    bool
+	IsFinished bool
+	JoinedAt   string
 }
 
 type customConditionsRequest struct {
@@ -69,22 +177,45 @@ type rankedResultRequest struct {
 }
 
 func (a *api) createLobby(w http.ResponseWriter, r *http.Request) {
-	var req createLobbyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
 
-	req.Faction = strings.TrimSpace(req.Faction)
-	if req.HostPlayerID <= 0 || req.Faction == "" || req.MatchSize <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "hostPlayerId, faction and matchSize are required",
-		})
+	var hostPlayerID int64
+	if err := json.Unmarshal(raw["hostPlayerId"], &hostPlayerID); err != nil || hostPlayerID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hostPlayerId is required"})
+		return
+	}
+	var matchSize int
+	if err := json.Unmarshal(raw["matchSize"], &matchSize); err != nil || matchSize <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "matchSize is required"})
+		return
+	}
+	isRanked := false
+	if br, ok := raw["isRanked"]; ok {
+		_ = json.Unmarshal(br, &isRanked)
+	}
+
+	slotKey := playerSlotKey(hostPlayerID)
+	if err := validateCreateLobbyKeys(raw, slotKey); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	hostFaction, ferr := factionFromPlayerSlot(raw, hostPlayerID)
+	if ferr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": ferr.Error()})
 		return
 	}
 
 	var exists int
-	err := a.db.QueryRow(`SELECT 1 FROM players WHERE id = $1`, req.HostPlayerID).Scan(&exists)
+	err = a.db.QueryRow(`SELECT 1 FROM players WHERE id = $1`, hostPlayerID).Scan(&exists)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host player does not exist"})
@@ -102,7 +233,7 @@ func (a *api) createLobby(w http.ResponseWriter, r *http.Request) {
 INSERT INTO lobbies (host_player_id, faction, match_size, is_ranked, mission_condition_id, status, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
 RETURNING id
-`, req.HostPlayerID, req.Faction, req.MatchSize, req.IsRanked, conditionID, now, now).Scan(&id)
+`, hostPlayerID, hostFaction, matchSize, isRanked, conditionID, now, now).Scan(&id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create lobby"})
 		return
@@ -112,7 +243,7 @@ RETURNING id
 INSERT INTO lobby_players (lobby_id, player_id, faction_name, is_ready, is_finished, joined_at)
 VALUES ($1, $2, $3, FALSE, FALSE, $4)
 ON CONFLICT (lobby_id, player_id) DO NOTHING
-`, id, req.HostPlayerID, req.Faction, now)
+`, id, hostPlayerID, hostFaction, now)
 
 	l, err := a.getLobbyByID(id)
 	if err != nil {
@@ -120,7 +251,7 @@ ON CONFLICT (lobby_id, player_id) DO NOTHING
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, l)
+	writeJSON(w, http.StatusCreated, lobbyToJSON(l))
 }
 
 func (a *api) getLobby(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +277,7 @@ func (a *api) getLobby(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, l)
+	writeJSON(w, http.StatusOK, lobbyToJSON(l))
 }
 
 func (a *api) getLobbyByID(id int64) (lobby, error) {
@@ -339,7 +470,7 @@ WHERE id = $3
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
 		return
 	}
-	writeJSON(w, http.StatusOK, updatedLobby)
+	writeJSON(w, http.StatusOK, lobbyToJSON(updatedLobby))
 }
 
 func (a *api) joinLobby(w http.ResponseWriter, r *http.Request) {
@@ -353,14 +484,29 @@ func (a *api) joinLobby(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req joinLobbyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, rerr := io.ReadAll(r.Body)
+	if rerr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	req.Faction = strings.TrimSpace(req.Faction)
-	if req.PlayerID <= 0 || req.Faction == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "playerId and faction are required"})
+	var playerID int64
+	if err := json.Unmarshal(raw["playerId"], &playerID); err != nil || playerID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "playerId is required"})
+		return
+	}
+	slotKey := playerSlotKey(playerID)
+	if err := validateJoinLobbyKeys(raw, slotKey); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	faction, ferr := factionFromPlayerSlot(raw, playerID)
+	if ferr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": ferr.Error()})
 		return
 	}
 	authPlayerID, err := a.requirePlayer(r)
@@ -368,7 +514,7 @@ func (a *api) joinLobby(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	if authPlayerID != req.PlayerID {
+	if authPlayerID != playerID {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
@@ -401,7 +547,7 @@ func (a *api) joinLobby(w http.ResponseWriter, r *http.Request) {
 INSERT INTO lobby_players (lobby_id, player_id, faction_name, is_ready, is_finished, joined_at)
 VALUES ($1, $2, $3, FALSE, FALSE, $4)
 ON CONFLICT (lobby_id, player_id) DO UPDATE SET faction_name = EXCLUDED.faction_name
-`, lobbyID, req.PlayerID, req.Faction, now)
+`, lobbyID, playerID, faction, now)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to join lobby"})
 		return
@@ -417,7 +563,7 @@ ON CONFLICT (lobby_id, player_id) DO UPDATE SET faction_name = EXCLUDED.faction_
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
 		return
 	}
-	writeJSON(w, http.StatusOK, updatedLobby)
+	writeJSON(w, http.StatusOK, lobbyToJSON(updatedLobby))
 }
 
 func (a *api) setCustomConditions(w http.ResponseWriter, r *http.Request) {
@@ -470,7 +616,7 @@ WHERE id = $5
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
 		return
 	}
-	writeJSON(w, http.StatusOK, updatedLobby)
+	writeJSON(w, http.StatusOK, lobbyToJSON(updatedLobby))
 }
 
 func (a *api) markLobbyReady(w http.ResponseWriter, r *http.Request) {
@@ -543,7 +689,7 @@ func (a *api) markLobbyReady(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
 		return
 	}
-	writeJSON(w, http.StatusOK, updatedLobby)
+	writeJSON(w, http.StatusOK, lobbyToJSON(updatedLobby))
 }
 
 func (a *api) markMatchFinished(w http.ResponseWriter, r *http.Request) {
@@ -680,7 +826,7 @@ DO UPDATE SET experience = player_faction_experience.experience + 1
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
 		return
 	}
-	writeJSON(w, http.StatusOK, updatedLobby)
+	writeJSON(w, http.StatusOK, lobbyToJSON(updatedLobby))
 }
 
 func (a *api) submitRankedResult(w http.ResponseWriter, r *http.Request) {
@@ -816,7 +962,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8), ($1,$9,$10,$11,$12,$13,$14,$8)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
 		return
 	}
-	writeJSON(w, http.StatusOK, updatedLobby)
+	writeJSON(w, http.StatusOK, lobbyToJSON(updatedLobby))
 }
 
 func parseLobbyActionID(path, action string) (int64, bool) {

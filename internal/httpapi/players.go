@@ -322,6 +322,8 @@ WHERE id = $1
 	_ = json.Unmarshal([]byte(hobbyEveningsRaw), &p.HobbyEvenings)
 	_ = json.Unmarshal([]byte(otherEventsRaw), &p.OtherEvents)
 
+	p.FactionExperience = []factionExperience{}
+
 	rows, err := a.db.Query(`
 SELECT faction_name, experience
 FROM player_faction_experience

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,9 +100,9 @@ func TestRegisterPlayerAndCreateLobbyFlow(t *testing.T) {
 
 	createLobbyBody := map[string]any{
 		"hostPlayerId": playerResp.ID,
-		"faction":      "Clan Wolf",
 		"matchSize":    350,
 	}
+	createLobbyBody[fmt.Sprintf("player%d", playerResp.ID)] = map[string]any{"faction": "Clan Wolf"}
 	lobbyPayload, _ := json.Marshal(createLobbyBody)
 	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
 	lobbyReq.Header.Set("Content-Type", "application/json")
@@ -112,28 +113,26 @@ func TestRegisterPlayerAndCreateLobbyFlow(t *testing.T) {
 		t.Fatalf("expected status %d for lobby creation, got %d, body=%s", http.StatusCreated, lobbyRec.Code, lobbyRec.Body.String())
 	}
 
-	var lobbyResp struct {
-		ID           int64  `json:"id"`
-		HostPlayerID int64  `json:"hostPlayerId"`
-		Faction      string `json:"faction"`
-		MatchSize    int    `json:"matchSize"`
-		Status       string `json:"status"`
-	}
+	var lobbyResp map[string]any
 	if err := json.Unmarshal(lobbyRec.Body.Bytes(), &lobbyResp); err != nil {
 		t.Fatalf("unmarshal lobby response: %v", err)
 	}
-
-	if lobbyResp.HostPlayerID != playerResp.ID {
-		t.Fatalf("expected hostPlayerId %d, got %d", playerResp.ID, lobbyResp.HostPlayerID)
+	if int64(lobbyResp["hostPlayerId"].(float64)) != playerResp.ID {
+		t.Fatalf("expected hostPlayerId %d, got %v", playerResp.ID, lobbyResp["hostPlayerId"])
 	}
-	if lobbyResp.Faction != "Clan Wolf" {
-		t.Fatalf("expected faction Clan Wolf, got %q", lobbyResp.Faction)
+	slotKey := fmt.Sprintf("player%d", playerResp.ID)
+	hostSlot, ok := lobbyResp[slotKey].(map[string]any)
+	if !ok {
+		t.Fatalf("expected %s object in lobby response", slotKey)
 	}
-	if lobbyResp.MatchSize != 350 {
-		t.Fatalf("expected matchSize 350, got %d", lobbyResp.MatchSize)
+	if hostSlot["faction"] != "Clan Wolf" {
+		t.Fatalf("expected %s.faction Clan Wolf, got %v", slotKey, hostSlot["faction"])
 	}
-	if lobbyResp.Status != "open" {
-		t.Fatalf("expected status open, got %q", lobbyResp.Status)
+	if int(lobbyResp["matchSize"].(float64)) != 350 {
+		t.Fatalf("expected matchSize 350, got %v", lobbyResp["matchSize"])
+	}
+	if lobbyResp["status"] != "open" {
+		t.Fatalf("expected status open, got %q", lobbyResp["status"])
 	}
 }
 
@@ -141,9 +140,9 @@ func TestCreateLobbyFailsForUnknownHostPlayer(t *testing.T) {
 	_, handler := setupTestServer(t)
 
 	createLobbyBody := map[string]any{
-		"hostPlayerId": 9999,
-		"faction":      "Clan Jade Falcon",
+		"hostPlayerId": int64(9999),
 		"matchSize":    300,
+		"player9999":   map[string]any{"faction": "Clan Jade Falcon"},
 	}
 	lobbyPayload, _ := json.Marshal(createLobbyBody)
 	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
@@ -186,12 +185,13 @@ func TestMissionConditionsOnlyForCasualLobbies(t *testing.T) {
 	playerID := createPlayer(t, "CondNick")
 
 	// Ranked lobby should NOT get condition automatically.
-	rankedPayload, _ := json.Marshal(map[string]any{
+	rankedBody := map[string]any{
 		"hostPlayerId": playerID,
-		"faction":      "Clan Wolf",
 		"matchSize":    350,
 		"isRanked":     true,
-	})
+	}
+	rankedBody[fmt.Sprintf("player%d", playerID)] = map[string]any{"faction": "Clan Wolf"}
+	rankedPayload, _ := json.Marshal(rankedBody)
 	rankedReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(rankedPayload))
 	rankedReq.Header.Set("Content-Type", "application/json")
 	rankedRec := httptest.NewRecorder()
@@ -215,12 +215,13 @@ func TestMissionConditionsOnlyForCasualLobbies(t *testing.T) {
 	}
 
 	// Casual lobby can randomize condition later.
-	casualPayload, _ := json.Marshal(map[string]any{
+	casualBody := map[string]any{
 		"hostPlayerId": playerID,
-		"faction":      "Clan Jade Falcon",
 		"matchSize":    300,
 		"isRanked":     false,
-	})
+	}
+	casualBody[fmt.Sprintf("player%d", playerID)] = map[string]any{"faction": "Clan Jade Falcon"}
+	casualPayload, _ := json.Marshal(casualBody)
 	casualReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(casualPayload))
 	casualReq.Header.Set("Content-Type", "application/json")
 	casualRec := httptest.NewRecorder()
@@ -310,6 +311,27 @@ func TestAdminSetRankAndDeleteLobbyAndPlayer(t *testing.T) {
 	}
 	authHeader := "Bearer " + loginResp.Token
 
+	listReq := httptest.NewRequest(http.MethodGet, "/admin/players?limit=10&offset=0&sort=nickname_asc", nil)
+	listReq.Header.Set("Authorization", authHeader)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("admin list players expected %d, got %d, body=%s", http.StatusOK, listRec.Code, listRec.Body.String())
+	}
+	var listOut struct {
+		Total int `json:"total"`
+		Items []struct {
+			Nickname string `json:"nickname"`
+			Role     string `json:"role"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listOut); err != nil {
+		t.Fatalf("unmarshal admin list: %v", err)
+	}
+	if listOut.Total < 1 || len(listOut.Items) < 1 {
+		t.Fatalf("expected non-empty admin player list, total=%d items=%d", listOut.Total, len(listOut.Items))
+	}
+
 	// Set rank.
 	setRankReq := map[string]any{
 		"rankTitle":      "Captain",
@@ -336,11 +358,9 @@ func TestAdminSetRankAndDeleteLobbyAndPlayer(t *testing.T) {
 	})
 
 	// Create a lobby for admin (lobby deletion test).
-	lobbyPayload, _ := json.Marshal(map[string]any{
-		"hostPlayerId": playerID,
-		"faction":      "Clan Wolf",
-		"matchSize":    350,
-	})
+	admLobby := map[string]any{"hostPlayerId": playerID, "matchSize": 350}
+	admLobby[fmt.Sprintf("player%d", playerID)] = map[string]any{"faction": "Clan Wolf"}
+	lobbyPayload, _ := json.Marshal(admLobby)
 	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
 	lobbyReq.Header.Set("Content-Type", "application/json")
 	lobbyRec := httptest.NewRecorder()
@@ -387,11 +407,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
 	}
 
 	// Create lobby for target and corresponding history row, then delete target player.
-	targetLobbyPayload, _ := json.Marshal(map[string]any{
-		"hostPlayerId": targetID,
-		"faction":      "Clan Wolf",
-		"matchSize":    350,
-	})
+	tgtLobby := map[string]any{"hostPlayerId": targetID, "matchSize": 350}
+	tgtLobby[fmt.Sprintf("player%d", targetID)] = map[string]any{"faction": "Clan Wolf"}
+	targetLobbyPayload, _ := json.Marshal(tgtLobby)
 	targetLobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(targetLobbyPayload))
 	targetLobbyReq.Header.Set("Content-Type", "application/json")
 	targetLobbyRec := httptest.NewRecorder()
@@ -513,6 +531,14 @@ func TestNonAdminCannotCallAdminEndpoints(t *testing.T) {
 	if setRankRec.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d, body=%s", http.StatusForbidden, setRankRec.Code, setRankRec.Body.String())
 	}
+
+	listRec := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/admin/players", nil)
+	listReq.Header.Set("Authorization", authHeader)
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusForbidden {
+		t.Fatalf("admin list players expected %d for non-admin, got %d, body=%s", http.StatusForbidden, listRec.Code, listRec.Body.String())
+	}
 }
 
 func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
@@ -568,12 +594,9 @@ func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
 	p2Token := loginToken(t, "FlowP2")
 
 	// Create casual lobby by player1.
-	createLobbyPayload, _ := json.Marshal(map[string]any{
-		"hostPlayerId": p1,
-		"faction":      "Clan Wolf",
-		"matchSize":    350,
-		"isRanked":     false,
-	})
+	flowLobby := map[string]any{"hostPlayerId": p1, "matchSize": 350, "isRanked": false}
+	flowLobby[fmt.Sprintf("player%d", p1)] = map[string]any{"faction": "Clan Wolf"}
+	createLobbyPayload, _ := json.Marshal(flowLobby)
 	createLobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createLobbyPayload))
 	createLobbyReq.Header.Set("Content-Type", "application/json")
 	createLobbyRec := httptest.NewRecorder()
@@ -587,10 +610,9 @@ func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
 	_ = json.Unmarshal(createLobbyRec.Body.Bytes(), &lobbyResp)
 
 	// Player2 joins with own faction.
-	joinPayload, _ := json.Marshal(map[string]any{
-		"playerId": p2,
-		"faction":  "Clan Jade Falcon",
-	})
+	joinBody := map[string]any{"playerId": p2}
+	joinBody[fmt.Sprintf("player%d", p2)] = map[string]any{"faction": "Clan Jade Falcon"}
+	joinPayload, _ := json.Marshal(joinBody)
 	joinReq := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobbyResp.ID, 10)+"/join", bytes.NewReader(joinPayload))
 	joinReq.Header.Set("Content-Type", "application/json")
 	joinReq.Header.Set("Authorization", "Bearer "+p2Token)
@@ -794,12 +816,9 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 	p1Token := loginToken(t, "Rated1")
 	p2Token := loginToken(t, "Rated2")
 
-	createLobbyPayload, _ := json.Marshal(map[string]any{
-		"hostPlayerId": p1,
-		"faction":      "Clan Wolf",
-		"matchSize":    350,
-		"isRanked":     true,
-	})
+	rankedLobby := map[string]any{"hostPlayerId": p1, "matchSize": 350, "isRanked": true}
+	rankedLobby[fmt.Sprintf("player%d", p1)] = map[string]any{"faction": "Clan Wolf"}
+	createLobbyPayload, _ := json.Marshal(rankedLobby)
 	createReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createLobbyPayload))
 	createReq.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
@@ -810,7 +829,9 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 	var lobby struct{ ID int64 `json:"id"` }
 	_ = json.Unmarshal(createRec.Body.Bytes(), &lobby)
 
-	joinPayload, _ := json.Marshal(map[string]any{"playerId": p2, "faction": "Clan Jade Falcon"})
+	rankedJoin := map[string]any{"playerId": p2}
+	rankedJoin[fmt.Sprintf("player%d", p2)] = map[string]any{"faction": "Clan Jade Falcon"}
+	joinPayload, _ := json.Marshal(rankedJoin)
 	joinReq := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobby.ID, 10)+"/join", bytes.NewReader(joinPayload))
 	joinReq.Header.Set("Content-Type", "application/json")
 	joinReq.Header.Set("Authorization", "Bearer "+p2Token)
