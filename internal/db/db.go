@@ -157,6 +157,14 @@ ADD COLUMN IF NOT EXISTS rating_applied BOOLEAN NOT NULL DEFAULT FALSE;
 	}
 
 	_, err = database.Exec(`
+ALTER TABLE lobbies
+ADD COLUMN IF NOT EXISTS meeting_place TEXT NOT NULL DEFAULT '';
+`)
+	if err != nil {
+		return fmt.Errorf("add lobbies.meeting_place: %w", err)
+	}
+
+	_, err = database.Exec(`
 CREATE TABLE IF NOT EXISTS lobbies_history (
     id BIGSERIAL PRIMARY KEY,
     original_lobby_id BIGINT NOT NULL,

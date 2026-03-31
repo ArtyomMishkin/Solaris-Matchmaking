@@ -100,6 +100,7 @@ func TestRegisterPlayerAndCreateLobbyFlow(t *testing.T) {
 
 	createLobbyBody := map[string]any{
 		"hostPlayerId": playerResp.ID,
+		"meetingPlace": "Main Club",
 		"matchSize":    350,
 	}
 	createLobbyBody[fmt.Sprintf("player%d", playerResp.ID)] = map[string]any{"faction": "Clan Wolf"}
@@ -141,6 +142,7 @@ func TestCreateLobbyFailsForUnknownHostPlayer(t *testing.T) {
 
 	createLobbyBody := map[string]any{
 		"hostPlayerId": int64(9999),
+		"meetingPlace": "Main Club",
 		"matchSize":    300,
 		"player9999":   map[string]any{"faction": "Clan Jade Falcon"},
 	}
@@ -187,6 +189,7 @@ func TestMissionConditionsOnlyForCasualLobbies(t *testing.T) {
 	// Ranked lobby should NOT get condition automatically.
 	rankedBody := map[string]any{
 		"hostPlayerId": playerID,
+		"meetingPlace": "Main Club",
 		"matchSize":    350,
 		"isRanked":     true,
 	}
@@ -217,6 +220,7 @@ func TestMissionConditionsOnlyForCasualLobbies(t *testing.T) {
 	// Casual lobby can randomize condition later.
 	casualBody := map[string]any{
 		"hostPlayerId": playerID,
+		"meetingPlace": "Main Club",
 		"matchSize":    300,
 		"isRanked":     false,
 	}
@@ -358,7 +362,7 @@ func TestAdminSetRankAndDeleteLobbyAndPlayer(t *testing.T) {
 	})
 
 	// Create a lobby for admin (lobby deletion test).
-	admLobby := map[string]any{"hostPlayerId": playerID, "matchSize": 350}
+	admLobby := map[string]any{"hostPlayerId": playerID, "meetingPlace": "Main Club", "matchSize": 350}
 	admLobby[fmt.Sprintf("player%d", playerID)] = map[string]any{"faction": "Clan Wolf"}
 	lobbyPayload, _ := json.Marshal(admLobby)
 	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
@@ -407,7 +411,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
 	}
 
 	// Create lobby for target and corresponding history row, then delete target player.
-	tgtLobby := map[string]any{"hostPlayerId": targetID, "matchSize": 350}
+	tgtLobby := map[string]any{"hostPlayerId": targetID, "meetingPlace": "Main Club", "matchSize": 350}
 	tgtLobby[fmt.Sprintf("player%d", targetID)] = map[string]any{"faction": "Clan Wolf"}
 	targetLobbyPayload, _ := json.Marshal(tgtLobby)
 	targetLobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(targetLobbyPayload))
@@ -594,7 +598,7 @@ func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
 	p2Token := loginToken(t, "FlowP2")
 
 	// Create casual lobby by player1.
-	flowLobby := map[string]any{"hostPlayerId": p1, "matchSize": 350, "isRanked": false}
+	flowLobby := map[string]any{"hostPlayerId": p1, "meetingPlace": "Main Club", "matchSize": 350, "isRanked": false}
 	flowLobby[fmt.Sprintf("player%d", p1)] = map[string]any{"faction": "Clan Wolf"}
 	createLobbyPayload, _ := json.Marshal(flowLobby)
 	createLobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createLobbyPayload))
@@ -816,7 +820,7 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 	p1Token := loginToken(t, "Rated1")
 	p2Token := loginToken(t, "Rated2")
 
-	rankedLobby := map[string]any{"hostPlayerId": p1, "matchSize": 350, "isRanked": true}
+	rankedLobby := map[string]any{"hostPlayerId": p1, "meetingPlace": "Main Club", "matchSize": 350, "isRanked": true}
 	rankedLobby[fmt.Sprintf("player%d", p1)] = map[string]any{"faction": "Clan Wolf"}
 	createLobbyPayload, _ := json.Marshal(rankedLobby)
 	createReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createLobbyPayload))

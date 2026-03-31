@@ -367,12 +367,13 @@ go run ./cmd/admin list-admins
 
 ### «Место»
 
-В коде **нет выбора места из справочника** и нет отдельного API под «локацию матча».
+В проекте нет выбора места из справочника — все «места» задаются текстом.
 
 - **`city`** — город из анкеты при регистрации; обязательная строка в **`POST /players`**; хранится в **`players.city`**.
-- **`preferredLocation`** — «приоритетная локация» / место игры **текстом**, тоже задаётся только при регистрации; хранится в **`players.preferred_location`**.
+- **`preferredLocation`** — «приоритетная локация» / место игры текстом; задаётся только при регистрации; хранится в **`players.preferred_location`**.
+- **`meetingPlace`** — место сбора конкретного матча (лобби); задаётся **хостом** при **`POST /lobbies`** и хранится в **`lobbies.meeting_place`**. Второй игрок видит это поле в ответе **`GET /lobbies/{id}`**.
 
-Оба поля — произвольный ввод пользователя, без нормализации на сервере (кроме `TrimSpace`).
+Все три поля — произвольный ввод пользователя без нормализации на сервере (кроме `TrimSpace` для входных строк).
 
 ### Время
 
@@ -544,6 +545,7 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 {
   "hostPlayerId": 1,
   "player1": { "faction": "Clan Wolf" },
+  "meetingPlace": "Main Club",
   "matchSize": 350,
   "isRanked": false
 }
@@ -551,7 +553,7 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 
 Ключ **`player1`** здесь потому, что **`hostPlayerId` равен 1**. Для хоста с id `7` используйте **`player7`**, и т.д.
 
-Ответ `201` — объект лобби (как в п. 8.6). Обязательны **`hostPlayerId`**, **`player{hostPlayerId}.faction`** и **`matchSize`**.
+Ответ `201` — объект лобби (как в п. 8.6). Обязательны **`hostPlayerId`**, **`meetingPlace`**, **`player{hostPlayerId}.faction`** и **`matchSize`**.
 
 ### 8.6 Получить лобби
 
@@ -581,6 +583,7 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
   },
   "matchSize": 350,
   "isRanked": false,
+  "meetingPlace": "Main Club",
   "missionConditionId": 3,
   "missionCondition": {
     "id": 3,

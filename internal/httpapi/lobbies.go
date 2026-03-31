@@ -18,6 +18,7 @@ type lobby struct {
 	ID                 int64
 	HostPlayerID       int64
 	Faction            string
+	MeetingPlace      string
 	MatchSize          int
 	IsRanked           bool
 	MissionConditionID *int64
@@ -67,7 +68,7 @@ func factionFromPlayerSlot(raw map[string]json.RawMessage, playerID int64) (stri
 func validateCreateLobbyKeys(raw map[string]json.RawMessage, allowedSlot string) error {
 	for k := range raw {
 		switch k {
-		case "hostPlayerId", "matchSize", "isRanked":
+		case "hostPlayerId", "matchSize", "isRanked", "meetingPlace":
 			continue
 		default:
 			if strings.HasPrefix(k, "player") {
@@ -105,6 +106,7 @@ func lobbyToJSON(l lobby) map[string]any {
 		"hostPlayerId": l.HostPlayerID,
 		"matchSize":    l.MatchSize,
 		"isRanked":     l.IsRanked,
+		"meetingPlace": l.MeetingPlace,
 		"status":       l.Status,
 		"createdAt":    l.CreatedAt,
 		"updatedAt":    l.UpdatedAt,
@@ -214,6 +216,13 @@ func (a *api) createLobby(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var meetingPlace string
+	if err := json.Unmarshal(raw["meetingPlace"], &meetingPlace); err != nil || strings.TrimSpace(meetingPlace) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "meetingPlace is required"})
+		return
+	}
+	meetingPlace = strings.TrimSpace(meetingPlace)
+
 	var exists int
 	err = a.db.QueryRow(`SELECT 1 FROM players WHERE id = $1`, hostPlayerID).Scan(&exists)
 	if err != nil {
@@ -230,10 +239,10 @@ func (a *api) createLobby(w http.ResponseWriter, r *http.Request) {
 
 	var id int64
 	err = a.db.QueryRow(`
-INSERT INTO lobbies (host_player_id, faction, match_size, is_ranked, mission_condition_id, status, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
+INSERT INTO lobbies (host_player_id, faction, match_size, is_ranked, meeting_place, mission_condition_id, status, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8)
 RETURNING id
-`, hostPlayerID, hostFaction, matchSize, isRanked, conditionID, now, now).Scan(&id)
+`, hostPlayerID, hostFaction, matchSize, isRanked, meetingPlace, conditionID, now, now).Scan(&id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create lobby"})
 		return
@@ -286,7 +295,7 @@ func (a *api) getLobbyByID(id int64) (lobby, error) {
 	var customMission, customWeather, customAtmosphere sql.NullString
 	var startedAt, finishedAt sql.NullString
 	err := a.db.QueryRow(`
-SELECT id, host_player_id, faction, match_size, is_ranked, mission_condition_id,
+SELECT id, host_player_id, faction, meeting_place, match_size, is_ranked, mission_condition_id,
        custom_mission_name, custom_weather_name, custom_atmosphere_name,
        status, started_at, finished_at, created_at, updated_at
 FROM lobbies
@@ -295,6 +304,7 @@ WHERE id = $1
 		&l.ID,
 		&l.HostPlayerID,
 		&l.Faction,
+		&l.MeetingPlace,
 		&l.MatchSize,
 		&l.IsRanked,
 		&conditionID,

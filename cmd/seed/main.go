@@ -75,8 +75,8 @@ func seed(database *sql.DB) error {
 	// Demo casual lobby with two players.
 	var lobbyID int64
 	err = tx.QueryRow(`
-INSERT INTO lobbies (host_player_id, faction, match_size, is_ranked, status, custom_mission_name, custom_weather_name, custom_atmosphere_name, created_at, updated_at)
-VALUES ($1, 'Clan Wolf', 350, FALSE, 'open', 'Capture Base', 'Snow', 'Thin', $2, $2)
+INSERT INTO lobbies (host_player_id, faction, match_size, is_ranked, meeting_place, status, custom_mission_name, custom_weather_name, custom_atmosphere_name, created_at, updated_at)
+VALUES ($1, 'Clan Wolf', 350, FALSE, 'North Club', 'open', 'Capture Base', 'Snow', 'Thin', $2, $2)
 RETURNING id
 `, p1, now).Scan(&lobbyID)
 	if err != nil {
