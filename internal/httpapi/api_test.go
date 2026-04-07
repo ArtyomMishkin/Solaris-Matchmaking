@@ -485,6 +485,84 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
 	}
 }
 
+func TestAdminPlayersCollectionShowsFirstThreePlayers(t *testing.T) {
+	database, handler := setupTestServer(t)
+
+	createPlayer := func(t *testing.T, nickname string) int64 {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{
+			"fullName":          "Player " + nickname,
+			"nickname":          nickname,
+			"city":              "Moscow",
+			"contacts":          "@"+nickname,
+			"preferredLocation": "Main Club",
+			"password":          "StrongPass123!",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/players", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create player expected %d, got %d, body=%s", http.StatusCreated, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("unmarshal player response: %v", err)
+		}
+		return out.ID
+	}
+
+	p1 := createPlayer(t, "A1")
+	p2 := createPlayer(t, "A2")
+	p3 := createPlayer(t, "A3")
+
+	// Keep admin auth working, but emulate incomplete credentials for one user.
+	if _, err := database.Exec(`UPDATE player_credentials SET role = 'admin' WHERE player_id = $1`, p1); err != nil {
+		t.Fatalf("promote admin: %v", err)
+	}
+	if _, err := database.Exec(`DELETE FROM player_credentials WHERE player_id = $1`, p3); err != nil {
+		t.Fatalf("delete credentials for p3: %v", err)
+	}
+
+	loginPayload, _ := json.Marshal(map[string]any{"nickname": "A1", "password": "StrongPass123!"})
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(loginPayload))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login expected %d, got %d, body=%s", http.StatusOK, loginRec.Code, loginRec.Body.String())
+	}
+	var loginResp struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(loginRec.Body.Bytes(), &loginResp)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/players?sort=id_asc&limit=3&offset=0", nil)
+	req.Header.Set("Authorization", "Bearer "+loginResp.Token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin list players expected %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var out struct {
+		Items []struct {
+			ID int64 `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal admin players list: %v", err)
+	}
+	if len(out.Items) != 3 {
+		t.Fatalf("expected first 3 players in page, got %d", len(out.Items))
+	}
+	if out.Items[0].ID != p1 || out.Items[1].ID != p2 || out.Items[2].ID != p3 {
+		t.Fatalf("expected ids [%d,%d,%d], got [%d,%d,%d]", p1, p2, p3, out.Items[0].ID, out.Items[1].ID, out.Items[2].ID)
+	}
+}
+
 func TestNonAdminCannotCallAdminEndpoints(t *testing.T) {
 	database, handler := setupTestServer(t)
 
