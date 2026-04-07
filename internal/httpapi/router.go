@@ -39,6 +39,7 @@ func NewRouter(db *sql.DB) http.Handler {
 
 	mux.HandleFunc("/admin/players/", a.adminPlayersSubresource)
 	mux.HandleFunc("/admin/lobbies/", a.adminLobbiesSubresource)
+	mux.HandleFunc("/admin/lobbies-history", a.adminLobbiesHistoryCollection)
 	mux.HandleFunc("/admin/lobbies-history/", a.adminLobbiesHistorySubresource)
 	mux.HandleFunc("/admin/players", a.adminPlayersCollection)
 

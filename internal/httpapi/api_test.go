@@ -462,6 +462,27 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
 	if targetHistoryCount != 0 {
 		t.Fatalf("expected target lobby history to be deleted, count=%d", targetHistoryCount)
 	}
+
+	// Ensure admin can read history collection and that extended fields are present.
+	historyListReq := httptest.NewRequest(http.MethodGet, "/admin/lobbies-history?limit=10&offset=0&sort=id_desc", nil)
+	historyListReq.Header.Set("Authorization", authHeader)
+	historyListRec := httptest.NewRecorder()
+	handler.ServeHTTP(historyListRec, historyListReq)
+	if historyListRec.Code != http.StatusOK {
+		t.Fatalf("admin list lobbies-history expected %d, got %d, body=%s", http.StatusOK, historyListRec.Code, historyListRec.Body.String())
+	}
+	var histOut struct {
+		Items []struct {
+			MeetingPlace string `json:"meetingPlace"`
+			IsRanked     bool   `json:"isRanked"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(historyListRec.Body.Bytes(), &histOut); err != nil {
+		t.Fatalf("unmarshal history list response: %v", err)
+	}
+	if len(histOut.Items) > 0 && histOut.Items[0].MeetingPlace == "" {
+		t.Fatalf("expected meetingPlace in history list item")
+	}
 }
 
 func TestNonAdminCannotCallAdminEndpoints(t *testing.T) {
@@ -542,6 +563,14 @@ func TestNonAdminCannotCallAdminEndpoints(t *testing.T) {
 	handler.ServeHTTP(listRec, listReq)
 	if listRec.Code != http.StatusForbidden {
 		t.Fatalf("admin list players expected %d for non-admin, got %d, body=%s", http.StatusForbidden, listRec.Code, listRec.Body.String())
+	}
+
+	historyListRec := httptest.NewRecorder()
+	historyListReq := httptest.NewRequest(http.MethodGet, "/admin/lobbies-history", nil)
+	historyListReq.Header.Set("Authorization", authHeader)
+	handler.ServeHTTP(historyListRec, historyListReq)
+	if historyListRec.Code != http.StatusForbidden {
+		t.Fatalf("admin list lobbies-history expected %d for non-admin, got %d, body=%s", http.StatusForbidden, historyListRec.Code, historyListRec.Body.String())
 	}
 }
 
@@ -703,6 +732,44 @@ func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
 	}
 	if p1FactionExp != 1 || p2FactionExp != 1 {
 		t.Fatalf("expected faction exp p1=1 p2=1, got p1=%d p2=%d", p1FactionExp, p2FactionExp)
+	}
+
+	var historyCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM lobbies_history WHERE original_lobby_id = $1`, lobbyResp.ID).Scan(&historyCount); err != nil {
+		t.Fatalf("count lobby history rows: %v", err)
+	}
+	if historyCount != 1 {
+		t.Fatalf("expected finished casual lobby to be archived once, got %d rows", historyCount)
+	}
+
+	var origRanked bool
+	var origMeeting string
+	var origMissionID sql.NullInt64
+	var origCustomMission, origCustomWeather, origCustomAtmos sql.NullString
+	if err := database.QueryRow(`
+SELECT is_ranked, meeting_place, mission_condition_id, custom_mission_name, custom_weather_name, custom_atmosphere_name
+FROM lobbies
+WHERE id = $1
+`, lobbyResp.ID).Scan(&origRanked, &origMeeting, &origMissionID, &origCustomMission, &origCustomWeather, &origCustomAtmos); err != nil {
+		t.Fatalf("load original casual lobby fields: %v", err)
+	}
+	var histRanked bool
+	var histMeeting string
+	var histMissionID sql.NullInt64
+	var histCustomMission, histCustomWeather, histCustomAtmos sql.NullString
+	if err := database.QueryRow(`
+SELECT is_ranked, meeting_place, mission_condition_id, custom_mission_name, custom_weather_name, custom_atmosphere_name
+FROM lobbies_history
+WHERE original_lobby_id = $1
+`, lobbyResp.ID).Scan(&histRanked, &histMeeting, &histMissionID, &histCustomMission, &histCustomWeather, &histCustomAtmos); err != nil {
+		t.Fatalf("load archived casual lobby fields: %v", err)
+	}
+	if origRanked != histRanked || origMeeting != histMeeting ||
+		origMissionID.Int64 != histMissionID.Int64 || origMissionID.Valid != histMissionID.Valid ||
+		origCustomMission.String != histCustomMission.String || origCustomMission.Valid != histCustomMission.Valid ||
+		origCustomWeather.String != histCustomWeather.String || origCustomWeather.Valid != histCustomWeather.Valid ||
+		origCustomAtmos.String != histCustomAtmos.String || origCustomAtmos.Valid != histCustomAtmos.Valid {
+		t.Fatalf("archived casual lobby fields mismatch original")
 	}
 }
 
@@ -881,6 +948,44 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 	}
 	if newR2 >= oldR2 {
 		t.Fatalf("expected loser rating decrease: old=%d new=%d", oldR2, newR2)
+	}
+
+	var historyCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM lobbies_history WHERE original_lobby_id = $1`, lobby.ID).Scan(&historyCount); err != nil {
+		t.Fatalf("count ranked lobby history rows: %v", err)
+	}
+	if historyCount != 1 {
+		t.Fatalf("expected finished ranked lobby to be archived once, got %d rows", historyCount)
+	}
+
+	var origRanked bool
+	var origMeeting string
+	var origMissionID sql.NullInt64
+	var origCustomMission, origCustomWeather, origCustomAtmos sql.NullString
+	if err := database.QueryRow(`
+SELECT is_ranked, meeting_place, mission_condition_id, custom_mission_name, custom_weather_name, custom_atmosphere_name
+FROM lobbies
+WHERE id = $1
+`, lobby.ID).Scan(&origRanked, &origMeeting, &origMissionID, &origCustomMission, &origCustomWeather, &origCustomAtmos); err != nil {
+		t.Fatalf("load original ranked lobby fields: %v", err)
+	}
+	var histRanked bool
+	var histMeeting string
+	var histMissionID sql.NullInt64
+	var histCustomMission, histCustomWeather, histCustomAtmos sql.NullString
+	if err := database.QueryRow(`
+SELECT is_ranked, meeting_place, mission_condition_id, custom_mission_name, custom_weather_name, custom_atmosphere_name
+FROM lobbies_history
+WHERE original_lobby_id = $1
+`, lobby.ID).Scan(&histRanked, &histMeeting, &histMissionID, &histCustomMission, &histCustomWeather, &histCustomAtmos); err != nil {
+		t.Fatalf("load archived ranked lobby fields: %v", err)
+	}
+	if origRanked != histRanked || origMeeting != histMeeting ||
+		origMissionID.Int64 != histMissionID.Int64 || origMissionID.Valid != histMissionID.Valid ||
+		origCustomMission.String != histCustomMission.String || origCustomMission.Valid != histCustomMission.Valid ||
+		origCustomWeather.String != histCustomWeather.String || origCustomWeather.Valid != histCustomWeather.Valid ||
+		origCustomAtmos.String != histCustomAtmos.String || origCustomAtmos.Valid != histCustomAtmos.Valid {
+		t.Fatalf("archived ranked lobby fields mismatch original")
 	}
 
 	// second attempt must fail (rating_applied protection)

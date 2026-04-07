@@ -422,6 +422,7 @@ go run ./cmd/admin list-admins
 | Метод | Путь |
 |--------|------|
 | `GET` | `/admin/players` |
+| `GET` | `/admin/lobbies-history` |
 | `PUT` | `/admin/players/{id}/rank` |
 | `DELETE` | `/admin/players/{id}` |
 | `DELETE` | `/admin/lobbies/{id}` |
@@ -831,7 +832,50 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 
 Удаляются строки в **`lobbies_history`** с **`original_lobby_id`**, затем само лобби (каскадно зачистятся **`lobby_players`** и связанное).
 
-### 9.4 Удалить конкретную запись из истории лобби
+### 9.4 История лобби (коллекция)
+
+| | |
+|---|---|
+| Метод и путь | `GET /admin/lobbies-history` |
+| Тело запроса | нет |
+
+Query-параметры:
+
+- **`sort`**: `id_desc` (по умолчанию), `id_asc`, `finished_desc`, `finished_asc`
+- **`limit`**: 1..200, по умолчанию 50
+- **`offset`**: >= 0, по умолчанию 0
+
+Ответ **`200`** — архив матчей, включая расширенные поля:
+
+```json
+{
+  "sort": "id_desc",
+  "limit": 50,
+  "offset": 0,
+  "total": 3,
+  "items": [
+    {
+      "id": 11,
+      "originalLobbyId": 42,
+      "hostPlayerId": 1,
+      "faction": "Clan Wolf",
+      "matchSize": 350,
+      "isRanked": false,
+      "meetingPlace": "Main Club",
+      "missionConditionId": 3,
+      "customMissionName": "Capture Base",
+      "customWeatherName": "Snow",
+      "customAtmosphereName": "Thin",
+      "status": "finished",
+      "createdAt": "2026-03-28T12:10:00Z",
+      "updatedAt": "2026-03-28T12:30:00Z",
+      "finishedAt": "2026-03-28T12:30:00Z"
+    }
+  ]
+}
+```
+
+### 9.5 Удалить конкретную запись из истории лобби
 
 | | |
 |---|---|
@@ -839,7 +883,7 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 
 Ответ **`204`** (и при необходимости тот же JSON `status`, как при удалении лобби в п. 9.3).
 
-### 9.5 Удалить игрока
+### 9.6 Удалить игрока
 
 | | |
 |---|---|
@@ -866,9 +910,10 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 
 1. Логин админа (`POST /auth/login`)
 2. `GET /admin/players` — список игроков (пагинация/сортировка)
-3. `PUT /admin/players/{id}/rank` - выдать звание
-4. `DELETE /admin/lobbies/{id}` - удалить лобби/историю
-5. `DELETE /admin/players/{id}` - удалить игрока
+3. `GET /admin/lobbies-history` — просмотр архива завершенных матчей
+4. `PUT /admin/players/{id}/rank` - выдать звание
+5. `DELETE /admin/lobbies/{id}` - удалить лобби/историю
+6. `DELETE /admin/players/{id}` - удалить игрока
 
 ---
 

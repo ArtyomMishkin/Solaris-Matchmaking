@@ -825,6 +825,10 @@ DO UPDATE SET experience = player_faction_experience.experience + 1
 		}
 
 		_, _ = tx.Exec(`UPDATE lobbies SET status = 'finished', finished_at = $1, updated_at = $1 WHERE id = $2`, now, lobbyID)
+		if err := archiveLobbyToHistory(tx, lobbyID, now); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to archive lobby history"})
+			return
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -961,6 +965,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8), ($1,$9,$10,$11,$12,$13,$14,$8)
 `, lobbyID, p1, r1, int(math.Round(newR1)), rd1, newRD1, s1, now, p2, r2, int(math.Round(newR2)), rd2, newRD2, s2)
 
 	_, _ = tx.Exec(`UPDATE lobbies SET rating_applied = TRUE, status = 'finished', finished_at = $1, updated_at = $1 WHERE id = $2`, now, lobbyID)
+	if err := archiveLobbyToHistory(tx, lobbyID, now); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to archive lobby history"})
+		return
+	}
 
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit rating update"})
@@ -986,6 +994,28 @@ func parseLobbyActionID(path, action string) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func archiveLobbyToHistory(tx *sql.Tx, lobbyID int64, now string) error {
+	_, err := tx.Exec(`
+INSERT INTO lobbies_history (
+    original_lobby_id, host_player_id, faction, match_size,
+    is_ranked, meeting_place, mission_condition_id,
+    custom_mission_name, custom_weather_name, custom_atmosphere_name,
+    status, created_at, updated_at, finished_at
+)
+SELECT
+    l.id, l.host_player_id, l.faction, l.match_size,
+    l.is_ranked, l.meeting_place, l.mission_condition_id,
+    l.custom_mission_name, l.custom_weather_name, l.custom_atmosphere_name,
+    l.status, l.created_at, $2, l.finished_at
+FROM lobbies l
+WHERE l.id = $1
+  AND NOT EXISTS (
+      SELECT 1 FROM lobbies_history h WHERE h.original_lobby_id = $1
+  )
+`, lobbyID, now)
+	return err
 }
 
 func containsString(items []string, target string) bool {
