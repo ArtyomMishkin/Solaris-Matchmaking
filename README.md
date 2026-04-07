@@ -28,12 +28,18 @@
 
 - `DATABASE_URL` - строка подключения к PostgreSQL
 - `JWT_SECRET` - секрет для подписи JWT (обязательно задать в проде)
+- `LOG_LEVEL` - уровень логов API: `debug`, `info` (по умолчанию), `warn`, `error`
+- `LOG_FORMAT` - `text` (по умолчанию) или `json` (удобно для агрегаторов логов)
+
+Каждый HTTP-запрос логируется как `http_request` (метод, путь, статус, длительность в мс, `request_id`). Если клиент передал заголовок `X-Request-ID`, он сохраняется и возвращается в ответе; иначе сервер генерирует свой.
 
 Пример для PowerShell:
 
 ```powershell
 $env:DATABASE_URL="postgres://postgres:postgres@localhost:5432/solaris_matchmaking?sslmode=disable"
 $env:JWT_SECRET="your-very-strong-secret"
+$env:LOG_FORMAT="json"
+$env:LOG_LEVEL="info"
 ```
 
 ### 2.3 Запуск
@@ -117,38 +123,26 @@ go run ./cmd/seed
 
 ### 4.3 `lobbies`
 
-Текущие лобби.
+Текущие и завершённые лобби (история больше не вынесена в отдельную таблицу; завершённые матчи определяются по `status='finished'`).
 
 - `id BIGSERIAL PRIMARY KEY`
 - `host_player_id BIGINT NOT NULL REFERENCES players(id)`
 - `faction TEXT NOT NULL`
 - `match_size INTEGER NOT NULL`
+- `status TEXT NOT NULL DEFAULT 'open'`
+- `created_at TEXT NOT NULL`
+- `updated_at TEXT NOT NULL`
 - `is_ranked BOOLEAN NOT NULL DEFAULT FALSE`
 - `mission_condition_id BIGINT NULL` - ссылка на `mission_conditions.id`
 - `custom_mission_name TEXT NULL` - ручная миссия (только non-MMR)
 - `custom_weather_name TEXT NULL` - ручная погода (только non-MMR)
 - `custom_atmosphere_name TEXT NULL` - ручная атмосфера (только non-MMR)
-- `status TEXT NOT NULL DEFAULT 'open'`
 - `started_at TEXT NULL` - время старта матча
 - `finished_at TEXT NULL` - время окончания матча
-- `created_at TEXT NOT NULL`
-- `updated_at TEXT NOT NULL`
+- `rating_applied BOOLEAN NOT NULL DEFAULT FALSE` - для ranked: рейтинг уже применён
+- `meeting_place TEXT NOT NULL DEFAULT ''`
 
-### 4.4 `lobbies_history`
-
-История лобби (архив/завершенные состояния/данные для отчета).
-
-- `id BIGSERIAL PRIMARY KEY`
-- `original_lobby_id BIGINT NOT NULL`
-- `host_player_id BIGINT NOT NULL`
-- `faction TEXT NOT NULL`
-- `match_size INTEGER NOT NULL`
-- `status TEXT NOT NULL`
-- `created_at TEXT NOT NULL`
-- `updated_at TEXT NOT NULL`
-- `finished_at TEXT NULL`
-
-### 4.5 `mission_conditions`
+### 4.4 `mission_conditions`
 
 Справочник условий миссий.
 
@@ -160,7 +154,7 @@ go run ./cmd/seed
 
 В миграции добавлены стартовые seed-записи.
 
-### 4.6 `player_faction_experience`
+### 4.5 `player_faction_experience`
 
 Отдельный опыт игрока по каждой фракции.
 
@@ -172,7 +166,7 @@ go run ./cmd/seed
 
 Пример: у игрока может быть `50` опыта в одной фракции и `2` в другой.
 
-### 4.7 `lobby_players`
+### 4.6 `lobby_players`
 
 Состав игроков в лобби и их состояние матча.
 
@@ -185,7 +179,7 @@ go run ./cmd/seed
 - `joined_at TEXT NOT NULL`
 - `UNIQUE (lobby_id, player_id)`
 
-### 4.8 `rating_history`
+### 4.7 `rating_history`
 
 История изменения рейтинга по ranked-матчам.
 
@@ -221,6 +215,36 @@ go run ./cmd/seed
 - Роль хранится в `player_credentials.role`
 - `player` - базовый пользователь
 - `admin` - доступ к админским endpoint-ам
+
+### 5.4 Структурное логгирование
+
+API использует `log/slog` и middleware `internal/logx`.
+
+- Формат логов выбирается через `LOG_FORMAT`:
+  - `json` - структурные JSON-логи (рекомендуется для prod)
+  - `text` - человекочитаемый формат (по умолчанию)
+- Уровень логов задаётся через `LOG_LEVEL`: `debug`, `info` (по умолчанию), `warn`, `error`
+- Все HTTP-запросы логируются событием `http_request` с полями:
+  - `method`, `path`, `status`, `duration_ms`, `request_id`
+  - `query` (добавляется только если есть query-параметры)
+- `request_id`:
+  - если клиент прислал `X-Request-ID`, он используется и возвращается обратно в ответе
+  - если нет, сервер генерирует ID и тоже возвращает его в `X-Request-ID`
+
+Пример JSON-лога:
+
+```json
+{
+  "time": "2026-04-07T12:40:11.123Z",
+  "level": "INFO",
+  "msg": "http_request",
+  "method": "POST",
+  "path": "/lobbies/42/join",
+  "status": 200,
+  "duration_ms": 18,
+  "request_id": "d4ab9f1c0d95a67b"
+}
+```
 
 ---
 
@@ -405,8 +429,11 @@ go run ./cmd/admin list-admins
 | `POST` | `/players` |
 | `GET` | `/players/{id}` |
 | `GET` | `/players/{id}/faction-experience` |
+| `GET` | `/players/{id}/lobbies-history` |
 | `POST` | `/lobbies` |
 | `GET` | `/lobbies/{id}` |
+| `GET` | `/lobbies-history/{id}` |
+| `GET` | `/lobbies-history/{id}/players` |
 | `GET` | `/mission-conditions` |
 | `POST` | `/lobbies/{id}/random-condition` |
 | `POST` | `/lobbies/{id}/join` |
@@ -415,18 +442,16 @@ go run ./cmd/admin list-admins
 | `POST` | `/lobbies/{id}/match-finished` |
 | `POST` | `/lobbies/{id}/ranked-result` |
 
-Для **`join`**, **`ready`**, **`match-finished`**, **`ranked-result`** нужен заголовок **`Authorization: Bearer <JWT>`** и совпадение **`playerId`** в теле (где требуется) с токеном.
+Для **`create lobby`**, **`join`**, **`ready`**, **`match-finished`**, **`ranked-result`** нужен заголовок **`Authorization: Bearer <JWT>`**. Для действий с `playerId` в теле (где требуется) он должен совпадать с токеном.
 
 ### Админские (JWT + роль `admin`)
 
 | Метод | Путь |
 |--------|------|
 | `GET` | `/admin/players` |
-| `GET` | `/admin/lobbies-history` |
 | `PUT` | `/admin/players/{id}/rank` |
 | `DELETE` | `/admin/players/{id}` |
 | `DELETE` | `/admin/lobbies/{id}` |
-| `DELETE` | `/admin/lobbies-history/{id}` |
 
 ---
 
@@ -539,6 +564,7 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 | | |
 |---|---|
 | Метод и путь | `POST /lobbies` |
+| Заголовок | `Authorization: Bearer <token>` (обязателен) |
 
 Тело (casual / ranked отличается только **`isRanked`**):
 
@@ -553,6 +579,7 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 ```
 
 Ключ **`player1`** здесь потому, что **`hostPlayerId` равен 1**. Для хоста с id `7` используйте **`player7`**, и т.д.
+`hostPlayerId` обязательно должен совпадать с `playerId` из токена, иначе `403 forbidden`.
 
 Ответ `201` — объект лобби (как в п. 8.6). Обязательны **`hostPlayerId`**, **`meetingPlace`**, **`player{hostPlayerId}.faction`** и **`matchSize`**.
 
@@ -734,6 +761,87 @@ Query-параметры:
 }
 ```
 
+### 8.13.1 История завершённых лобби игрока
+
+| | |
+|---|---|
+| Метод и путь | `GET /players/{id}/lobbies-history` |
+
+Источник данных: `lobbies` + `lobby_players` с фильтром `status='finished'`.
+
+Query-параметры:
+- **`sort`**: `finished_desc` (по умолчанию), `finished_asc`, `id_desc`, `id_asc`
+- **`limit`**: 1..200, по умолчанию 50
+- **`offset`**: ≥ 0, по умолчанию 0
+
+Ответ `200`:
+
+```json
+{
+  "playerId": 1,
+  "sort": "finished_desc",
+  "limit": 50,
+  "offset": 0,
+  "total": 1,
+  "items": [
+    {
+      "id": 1,
+      "originalLobbyId": 10,
+      "hostPlayerId": 1,
+      "hostFaction": "Clan Wolf",
+      "playerFaction": "Clan Wolf",
+      "matchSize": 350,
+      "status": "finished",
+      "isRanked": false,
+      "meetingPlace": "Main Club"
+    }
+  ]
+}
+```
+
+### 8.13.2 Карточка завершённого лобби
+
+| | |
+|---|---|
+| Метод и путь | `GET /lobbies-history/{id}` |
+
+`{id}` здесь — это `lobbies.id` завершённого лобби.
+
+Ответ `200`:
+
+```json
+{
+  "lobby": {
+    "id": 1,
+    "originalLobbyId": 10,
+    "status": "finished",
+    "meetingPlace": "Main Club"
+  },
+  "players": [
+    { "playerId": 1, "faction": "Clan Wolf", "isReady": true, "isFinished": true, "joinedAt": "..." },
+    { "playerId": 2, "faction": "Clan Jade Falcon", "isReady": true, "isFinished": true, "joinedAt": "..." }
+  ]
+}
+```
+
+### 8.13.3 Состав игроков завершённого лобби
+
+| | |
+|---|---|
+| Метод и путь | `GET /lobbies-history/{id}/players` |
+
+Ответ `200`:
+
+```json
+{
+  "lobbyHistoryId": 1,
+  "players": [
+    { "playerId": 1, "faction": "Clan Wolf", "isReady": true, "isFinished": true, "joinedAt": "..." },
+    { "playerId": 2, "faction": "Clan Jade Falcon", "isReady": true, "isFinished": true, "joinedAt": "..." }
+  ]
+}
+```
+
 ### 8.14 Зафиксировать результат ranked-матча (Glicko)
 
 | | |
@@ -821,7 +929,7 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 
 Ответ `200` — полный объект игрока (как **`GET /players/{id}`**).
 
-### 9.3 Удалить лобби и его историю
+### 9.3 Удалить лобби
 
 | | |
 |---|---|
@@ -830,66 +938,15 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 
 Ответ **`204`**. В теле при этом всё равно может уйти небольшой JSON `{"status":"deleted"}` (особенность текущей реализации `writeJSON`).
 
-Удаляются строки в **`lobbies_history`** с **`original_lobby_id`**, затем само лобби (каскадно зачистятся **`lobby_players`** и связанное).
+Удаляется лобби из **`lobbies`** (каскадно зачистятся **`lobby_players`** и связанное).
 
-### 9.4 История лобби (коллекция)
-
-| | |
-|---|---|
-| Метод и путь | `GET /admin/lobbies-history` |
-| Тело запроса | нет |
-
-Query-параметры:
-
-- **`sort`**: `id_desc` (по умолчанию), `id_asc`, `finished_desc`, `finished_asc`
-- **`limit`**: 1..200, по умолчанию 50
-- **`offset`**: >= 0, по умолчанию 0
-
-Ответ **`200`** — архив матчей, включая расширенные поля:
-
-```json
-{
-  "sort": "id_desc",
-  "limit": 50,
-  "offset": 0,
-  "total": 3,
-  "items": [
-    {
-      "id": 11,
-      "originalLobbyId": 42,
-      "hostPlayerId": 1,
-      "faction": "Clan Wolf",
-      "matchSize": 350,
-      "isRanked": false,
-      "meetingPlace": "Main Club",
-      "missionConditionId": 3,
-      "customMissionName": "Capture Base",
-      "customWeatherName": "Snow",
-      "customAtmosphereName": "Thin",
-      "status": "finished",
-      "createdAt": "2026-03-28T12:10:00Z",
-      "updatedAt": "2026-03-28T12:30:00Z",
-      "finishedAt": "2026-03-28T12:30:00Z"
-    }
-  ]
-}
-```
-
-### 9.5 Удалить конкретную запись из истории лобби
-
-| | |
-|---|---|
-| Метод и путь | `DELETE /admin/lobbies-history/{id}` |
-
-Ответ **`204`** (и при необходимости тот же JSON `status`, как при удалении лобби в п. 9.3).
-
-### 9.6 Удалить игрока
+### 9.4 Удалить игрока
 
 | | |
 |---|---|
 | Метод и путь | `DELETE /admin/players/{id}` |
 
-Ответ **`204`**. Перед удалением игрока API удаляет его записи в **`lobbies_history`** и **`lobbies`** где он хост; дальше срабатывает **`DELETE FROM players`** (остальное — каскады FK в БД).
+Ответ **`204`**. Перед удалением игрока API удаляет его лобби в **`lobbies`** где он хост; дальше срабатывает **`DELETE FROM players`** (остальное — каскады FK в БД).
 
 ---
 
@@ -910,10 +967,9 @@ Query-параметры:
 
 1. Логин админа (`POST /auth/login`)
 2. `GET /admin/players` — список игроков (пагинация/сортировка)
-3. `GET /admin/lobbies-history` — просмотр архива завершенных матчей
-4. `PUT /admin/players/{id}/rank` - выдать звание
-5. `DELETE /admin/lobbies/{id}` - удалить лобби/историю
-6. `DELETE /admin/players/{id}` - удалить игрока
+3. `PUT /admin/players/{id}/rank` - выдать звание
+4. `DELETE /admin/lobbies/{id}` - удалить лобби
+5. `DELETE /admin/players/{id}` - удалить игрока
 
 ---
 
@@ -973,6 +1029,7 @@ go test ./... -v 2>&1 | Tee-Object -FilePath test-results.txt
 | `TestNonAdminCannotCallAdminEndpoints` | игрок без роли `admin` не может вызывать админские маршруты (в т.ч. список игроков) |
 | `TestCasualLobbyReadyAndFinishGivesExperience` | casual: `join` → `ready` → оба `match-finished` → начисление опыта и `player_faction_experience` |
 | `TestGetPlayerFactionExperienceWithPaginationAndSort` | `GET /players/{id}/faction-experience` с сортировкой и пагинацией |
+| `TestPublicLobbyHistoryEndpoints` | публичные read-only ручки истории: список игрока, карточка, состав |
 | `TestRankedResultAppliesGlickoOnce` | ranked: `ranked-result` обновляет Glicko один раз, повторный вызов не дублирует расчёт |
 
 ---

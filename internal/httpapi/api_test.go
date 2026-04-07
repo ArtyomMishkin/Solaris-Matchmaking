@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"solaris-matchmaking/internal/db"
 	"solaris-matchmaking/internal/httpapi"
@@ -33,7 +32,6 @@ func setupTestServer(t *testing.T) (*sql.DB, http.Handler) {
 	_, _ = database.Exec(`TRUNCATE TABLE
 		lobby_players,
 		player_faction_experience,
-		lobbies_history,
 		lobbies,
 		player_credentials,
 		players
@@ -44,6 +42,31 @@ func setupTestServer(t *testing.T) (*sql.DB, http.Handler) {
 	})
 
 	return database, httpapi.NewRouter(database)
+}
+
+func loginTestToken(t *testing.T, handler http.Handler, nickname, password string) string {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{
+		"nickname": nickname,
+		"password": password,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login expected %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal login response: %v", err)
+	}
+	if out.Token == "" {
+		t.Fatalf("expected non-empty token")
+	}
+	return out.Token
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -97,6 +120,7 @@ func TestRegisterPlayerAndCreateLobbyFlow(t *testing.T) {
 	if role != "player" {
 		t.Fatalf("expected role 'player', got %q", role)
 	}
+	playerToken := loginTestToken(t, handler, "WolfGuard", "StrongPass123!")
 
 	createLobbyBody := map[string]any{
 		"hostPlayerId": playerResp.ID,
@@ -107,6 +131,7 @@ func TestRegisterPlayerAndCreateLobbyFlow(t *testing.T) {
 	lobbyPayload, _ := json.Marshal(createLobbyBody)
 	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
 	lobbyReq.Header.Set("Content-Type", "application/json")
+	lobbyReq.Header.Set("Authorization", "Bearer "+playerToken)
 	lobbyRec := httptest.NewRecorder()
 	handler.ServeHTTP(lobbyRec, lobbyReq)
 
@@ -140,6 +165,23 @@ func TestRegisterPlayerAndCreateLobbyFlow(t *testing.T) {
 func TestCreateLobbyFailsForUnknownHostPlayer(t *testing.T) {
 	_, handler := setupTestServer(t)
 
+	payload, _ := json.Marshal(map[string]any{
+		"fullName":          "Tester",
+		"nickname":          "TesterHostCheck",
+		"city":              "Moscow",
+		"contacts":          "@tester",
+		"preferredLocation": "Main Club",
+		"password":          "StrongPass123!",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/players", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create player expected %d, got %d, body=%s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	token := loginTestToken(t, handler, "TesterHostCheck", "StrongPass123!")
+
 	createLobbyBody := map[string]any{
 		"hostPlayerId": int64(9999),
 		"meetingPlace": "Main Club",
@@ -149,11 +191,12 @@ func TestCreateLobbyFailsForUnknownHostPlayer(t *testing.T) {
 	lobbyPayload, _ := json.Marshal(createLobbyBody)
 	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
 	lobbyReq.Header.Set("Content-Type", "application/json")
+	lobbyReq.Header.Set("Authorization", "Bearer "+token)
 	lobbyRec := httptest.NewRecorder()
 	handler.ServeHTTP(lobbyRec, lobbyReq)
 
-	if lobbyRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d, body=%s", http.StatusBadRequest, lobbyRec.Code, lobbyRec.Body.String())
+	if lobbyRec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusForbidden, lobbyRec.Code, lobbyRec.Body.String())
 	}
 }
 
@@ -185,6 +228,7 @@ func TestMissionConditionsOnlyForCasualLobbies(t *testing.T) {
 	}
 
 	playerID := createPlayer(t, "CondNick")
+	hostToken := loginTestToken(t, handler, "CondNick", "StrongPass123!")
 
 	// Ranked lobby should NOT get condition automatically.
 	rankedBody := map[string]any{
@@ -197,6 +241,7 @@ func TestMissionConditionsOnlyForCasualLobbies(t *testing.T) {
 	rankedPayload, _ := json.Marshal(rankedBody)
 	rankedReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(rankedPayload))
 	rankedReq.Header.Set("Content-Type", "application/json")
+	rankedReq.Header.Set("Authorization", "Bearer "+hostToken)
 	rankedRec := httptest.NewRecorder()
 	handler.ServeHTTP(rankedRec, rankedReq)
 	if rankedRec.Code != http.StatusCreated {
@@ -228,6 +273,7 @@ func TestMissionConditionsOnlyForCasualLobbies(t *testing.T) {
 	casualPayload, _ := json.Marshal(casualBody)
 	casualReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(casualPayload))
 	casualReq.Header.Set("Content-Type", "application/json")
+	casualReq.Header.Set("Authorization", "Bearer "+hostToken)
 	casualRec := httptest.NewRecorder()
 	handler.ServeHTTP(casualRec, casualReq)
 	if casualRec.Code != http.StatusCreated {
@@ -367,6 +413,7 @@ func TestAdminSetRankAndDeleteLobbyAndPlayer(t *testing.T) {
 	lobbyPayload, _ := json.Marshal(admLobby)
 	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
 	lobbyReq.Header.Set("Content-Type", "application/json")
+	lobbyReq.Header.Set("Authorization", authHeader)
 	lobbyRec := httptest.NewRecorder()
 	handler.ServeHTTP(lobbyRec, lobbyReq)
 	if lobbyRec.Code != http.StatusCreated {
@@ -380,17 +427,7 @@ func TestAdminSetRankAndDeleteLobbyAndPlayer(t *testing.T) {
 	}
 	lobbyID := lobbyResp.ID
 
-	// Insert corresponding history row.
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = database.Exec(`
-INSERT INTO lobbies_history (original_lobby_id, host_player_id, faction, match_size, status, created_at, updated_at, finished_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
-`, lobbyID, playerID, "Clan Wolf", 350, "open", now, now)
-	if err != nil {
-		t.Fatalf("insert lobby history: %v", err)
-	}
-
-	// Delete lobby (should also delete from history by original_lobby_id).
+	// Delete lobby.
 	deleteLobbyReq := httptest.NewRequest(http.MethodDelete, "/admin/lobbies/"+strconv.FormatInt(lobbyID, 10), nil)
 	deleteLobbyReq.Header.Set("Authorization", authHeader)
 	deleteLobbyRec := httptest.NewRecorder()
@@ -404,18 +441,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
 	if lobbyCount != 0 {
 		t.Fatalf("expected lobby to be deleted, count=%d", lobbyCount)
 	}
-	var historyCount int
-	_ = database.QueryRow(`SELECT COUNT(1) FROM lobbies_history WHERE original_lobby_id = $1`, lobbyID).Scan(&historyCount)
-	if historyCount != 0 {
-		t.Fatalf("expected lobby history to be deleted, count=%d", historyCount)
-	}
-
-	// Create lobby for target and corresponding history row, then delete target player.
+	// Create lobby for target, then delete target player.
 	tgtLobby := map[string]any{"hostPlayerId": targetID, "meetingPlace": "Main Club", "matchSize": 350}
 	tgtLobby[fmt.Sprintf("player%d", targetID)] = map[string]any{"faction": "Clan Wolf"}
+	targetToken := loginTestToken(t, handler, "TargetNick", "StrongPass123!")
 	targetLobbyPayload, _ := json.Marshal(tgtLobby)
 	targetLobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(targetLobbyPayload))
 	targetLobbyReq.Header.Set("Content-Type", "application/json")
+	targetLobbyReq.Header.Set("Authorization", "Bearer "+targetToken)
 	targetLobbyRec := httptest.NewRecorder()
 	handler.ServeHTTP(targetLobbyRec, targetLobbyReq)
 	if targetLobbyRec.Code != http.StatusCreated {
@@ -427,16 +460,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
 	if err := json.Unmarshal(targetLobbyRec.Body.Bytes(), &targetLobbyResp); err != nil {
 		t.Fatalf("unmarshal target lobby response: %v", err)
 	}
-	targetLobbyID := targetLobbyResp.ID
-
-	_, err = database.Exec(`
-INSERT INTO lobbies_history (original_lobby_id, host_player_id, faction, match_size, status, created_at, updated_at, finished_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
-`, targetLobbyID, targetID, "Clan Wolf", 350, "open", now, now)
-	if err != nil {
-		t.Fatalf("insert target lobby history: %v", err)
-	}
-
 	// Delete target player.
 	deletePlayerReq := httptest.NewRequest(http.MethodDelete, "/admin/players/"+strconv.FormatInt(targetID, 10), nil)
 	deletePlayerReq.Header.Set("Authorization", authHeader)
@@ -457,32 +480,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $6)
 	if targetLobbyCount != 0 {
 		t.Fatalf("expected target lobbies to be deleted, count=%d", targetLobbyCount)
 	}
-	var targetHistoryCount int
-	_ = database.QueryRow(`SELECT COUNT(1) FROM lobbies_history WHERE host_player_id = $1`, targetID).Scan(&targetHistoryCount)
-	if targetHistoryCount != 0 {
-		t.Fatalf("expected target lobby history to be deleted, count=%d", targetHistoryCount)
-	}
-
-	// Ensure admin can read history collection and that extended fields are present.
-	historyListReq := httptest.NewRequest(http.MethodGet, "/admin/lobbies-history?limit=10&offset=0&sort=id_desc", nil)
-	historyListReq.Header.Set("Authorization", authHeader)
-	historyListRec := httptest.NewRecorder()
-	handler.ServeHTTP(historyListRec, historyListReq)
-	if historyListRec.Code != http.StatusOK {
-		t.Fatalf("admin list lobbies-history expected %d, got %d, body=%s", http.StatusOK, historyListRec.Code, historyListRec.Body.String())
-	}
-	var histOut struct {
-		Items []struct {
-			MeetingPlace string `json:"meetingPlace"`
-			IsRanked     bool   `json:"isRanked"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(historyListRec.Body.Bytes(), &histOut); err != nil {
-		t.Fatalf("unmarshal history list response: %v", err)
-	}
-	if len(histOut.Items) > 0 && histOut.Items[0].MeetingPlace == "" {
-		t.Fatalf("expected meetingPlace in history list item")
-	}
 }
 
 func TestAdminPlayersCollectionShowsFirstThreePlayers(t *testing.T) {
@@ -494,7 +491,7 @@ func TestAdminPlayersCollectionShowsFirstThreePlayers(t *testing.T) {
 			"fullName":          "Player " + nickname,
 			"nickname":          nickname,
 			"city":              "Moscow",
-			"contacts":          "@"+nickname,
+			"contacts":          "@" + nickname,
 			"preferredLocation": "Main Club",
 			"password":          "StrongPass123!",
 		})
@@ -643,13 +640,6 @@ func TestNonAdminCannotCallAdminEndpoints(t *testing.T) {
 		t.Fatalf("admin list players expected %d for non-admin, got %d, body=%s", http.StatusForbidden, listRec.Code, listRec.Body.String())
 	}
 
-	historyListRec := httptest.NewRecorder()
-	historyListReq := httptest.NewRequest(http.MethodGet, "/admin/lobbies-history", nil)
-	historyListReq.Header.Set("Authorization", authHeader)
-	handler.ServeHTTP(historyListRec, historyListReq)
-	if historyListRec.Code != http.StatusForbidden {
-		t.Fatalf("admin list lobbies-history expected %d for non-admin, got %d, body=%s", http.StatusForbidden, historyListRec.Code, historyListRec.Body.String())
-	}
 }
 
 func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
@@ -661,7 +651,7 @@ func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
 			"fullName":          "Player " + nickname,
 			"nickname":          nickname,
 			"city":              "Moscow",
-			"contacts":          "@"+nickname,
+			"contacts":          "@" + nickname,
 			"preferredLocation": "Main Club",
 			"password":          "StrongPass123!",
 		})
@@ -710,6 +700,7 @@ func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
 	createLobbyPayload, _ := json.Marshal(flowLobby)
 	createLobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createLobbyPayload))
 	createLobbyReq.Header.Set("Content-Type", "application/json")
+	createLobbyReq.Header.Set("Authorization", "Bearer "+p1Token)
 	createLobbyRec := httptest.NewRecorder()
 	handler.ServeHTTP(createLobbyRec, createLobbyReq)
 	if createLobbyRec.Code != http.StatusCreated {
@@ -812,14 +803,6 @@ func TestCasualLobbyReadyAndFinishGivesExperience(t *testing.T) {
 		t.Fatalf("expected faction exp p1=1 p2=1, got p1=%d p2=%d", p1FactionExp, p2FactionExp)
 	}
 
-	var historyCount int
-	if err := database.QueryRow(`SELECT COUNT(1) FROM lobbies_history WHERE original_lobby_id = $1`, lobbyResp.ID).Scan(&historyCount); err != nil {
-		t.Fatalf("count lobby history rows: %v", err)
-	}
-	if historyCount != 1 {
-		t.Fatalf("expected finished casual lobby to be archived once, got %d rows", historyCount)
-	}
-
 	var origRanked bool
 	var origMeeting string
 	var origMissionID sql.NullInt64
@@ -831,23 +814,9 @@ WHERE id = $1
 `, lobbyResp.ID).Scan(&origRanked, &origMeeting, &origMissionID, &origCustomMission, &origCustomWeather, &origCustomAtmos); err != nil {
 		t.Fatalf("load original casual lobby fields: %v", err)
 	}
-	var histRanked bool
-	var histMeeting string
-	var histMissionID sql.NullInt64
-	var histCustomMission, histCustomWeather, histCustomAtmos sql.NullString
-	if err := database.QueryRow(`
-SELECT is_ranked, meeting_place, mission_condition_id, custom_mission_name, custom_weather_name, custom_atmosphere_name
-FROM lobbies_history
-WHERE original_lobby_id = $1
-`, lobbyResp.ID).Scan(&histRanked, &histMeeting, &histMissionID, &histCustomMission, &histCustomWeather, &histCustomAtmos); err != nil {
-		t.Fatalf("load archived casual lobby fields: %v", err)
-	}
-	if origRanked != histRanked || origMeeting != histMeeting ||
-		origMissionID.Int64 != histMissionID.Int64 || origMissionID.Valid != histMissionID.Valid ||
-		origCustomMission.String != histCustomMission.String || origCustomMission.Valid != histCustomMission.Valid ||
-		origCustomWeather.String != histCustomWeather.String || origCustomWeather.Valid != histCustomWeather.Valid ||
-		origCustomAtmos.String != histCustomAtmos.String || origCustomAtmos.Valid != histCustomAtmos.Valid {
-		t.Fatalf("archived casual lobby fields mismatch original")
+	if !origRanked && origMeeting == "" && !origMissionID.Valid &&
+		!origCustomMission.Valid && !origCustomWeather.Valid && !origCustomAtmos.Valid {
+		t.Fatalf("expected lobby to keep final state fields after finish")
 	}
 }
 
@@ -921,8 +890,8 @@ VALUES
 	}
 }
 
-func TestRankedResultAppliesGlickoOnce(t *testing.T) {
-	database, handler := setupTestServer(t)
+func TestPublicLobbyHistoryEndpoints(t *testing.T) {
+	_, handler := setupTestServer(t)
 
 	createPlayer := func(t *testing.T, nickname string) int64 {
 		t.Helper()
@@ -930,7 +899,7 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 			"fullName":          "Player " + nickname,
 			"nickname":          nickname,
 			"city":              "Moscow",
-			"contacts":          "@"+nickname,
+			"contacts":          "@" + nickname,
 			"preferredLocation": "Main Club",
 			"password":          "StrongPass123!",
 		})
@@ -941,7 +910,213 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create player expected %d, got %d, body=%s", http.StatusCreated, rec.Code, rec.Body.String())
 		}
-		var out struct{ ID int64 `json:"id"` }
+		var out struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out.ID
+	}
+	loginToken := func(t *testing.T, nickname string) string {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"nickname": nickname, "password": "StrongPass123!"})
+		req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login expected %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Token string `json:"token"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out.Token
+	}
+
+	p1 := createPlayer(t, "HistP1")
+	p2 := createPlayer(t, "HistP2")
+	p1Token := loginToken(t, "HistP1")
+	p2Token := loginToken(t, "HistP2")
+
+	lobbyBody := map[string]any{"hostPlayerId": p1, "meetingPlace": "Main Club", "matchSize": 300, "isRanked": false}
+	lobbyBody[fmt.Sprintf("player%d", p1)] = map[string]any{"faction": "Clan Wolf"}
+	createPayload, _ := json.Marshal(lobbyBody)
+	createReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createPayload))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Bearer "+p1Token)
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create lobby expected %d, got %d, body=%s", http.StatusCreated, createRec.Code, createRec.Body.String())
+	}
+	var lobby struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(createRec.Body.Bytes(), &lobby)
+
+	joinBody := map[string]any{"playerId": p2}
+	joinBody[fmt.Sprintf("player%d", p2)] = map[string]any{"faction": "Clan Jade Falcon"}
+	joinPayload, _ := json.Marshal(joinBody)
+	joinReq := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobby.ID, 10)+"/join", bytes.NewReader(joinPayload))
+	joinReq.Header.Set("Content-Type", "application/json")
+	joinReq.Header.Set("Authorization", "Bearer "+p2Token)
+	joinRec := httptest.NewRecorder()
+	handler.ServeHTTP(joinRec, joinReq)
+	if joinRec.Code != http.StatusOK {
+		t.Fatalf("join expected %d, got %d, body=%s", http.StatusOK, joinRec.Code, joinRec.Body.String())
+	}
+
+	readyReq := func(playerID int64, token string) {
+		payload, _ := json.Marshal(map[string]any{"playerId": playerID})
+		req := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobby.ID, 10)+"/ready", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ready expected %d, got %d", http.StatusOK, rec.Code)
+		}
+	}
+	readyReq(p1, p1Token)
+	readyReq(p2, p2Token)
+
+	finishReq := func(playerID int64, token string) {
+		payload, _ := json.Marshal(map[string]any{"playerId": playerID})
+		req := httptest.NewRequest(http.MethodPost, "/lobbies/"+strconv.FormatInt(lobby.ID, 10)+"/match-finished", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("match-finished expected %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+		}
+	}
+	finishReq(p1, p1Token)
+	finishReq(p2, p2Token)
+
+	playerHistReq := httptest.NewRequest(http.MethodGet, "/players/"+strconv.FormatInt(p1, 10)+"/lobbies-history?limit=10&offset=0", nil)
+	playerHistRec := httptest.NewRecorder()
+	handler.ServeHTTP(playerHistRec, playerHistReq)
+	if playerHistRec.Code != http.StatusOK {
+		t.Fatalf("player lobbies history expected %d, got %d, body=%s", http.StatusOK, playerHistRec.Code, playerHistRec.Body.String())
+	}
+	var playerHistOut struct {
+		PlayerID int64 `json:"playerId"`
+		Total    int   `json:"total"`
+		Items    []struct {
+			ID              int64  `json:"id"`
+			OriginalLobbyID int64  `json:"originalLobbyId"`
+			HostFaction     string `json:"hostFaction"`
+			PlayerFaction   string `json:"playerFaction"`
+			MeetingPlace    string `json:"meetingPlace"`
+			Status          string `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(playerHistRec.Body.Bytes(), &playerHistOut); err != nil {
+		t.Fatalf("unmarshal player lobbies history: %v", err)
+	}
+	if playerHistOut.PlayerID != p1 || playerHistOut.Total != 1 || len(playerHistOut.Items) != 1 {
+		t.Fatalf("expected one history item for player, got playerId=%d total=%d items=%d", playerHistOut.PlayerID, playerHistOut.Total, len(playerHistOut.Items))
+	}
+	if playerHistOut.Items[0].OriginalLobbyID != lobby.ID || playerHistOut.Items[0].MeetingPlace != "Main Club" {
+		t.Fatalf("unexpected player history item: originalLobbyId=%d meetingPlace=%s", playerHistOut.Items[0].OriginalLobbyID, playerHistOut.Items[0].MeetingPlace)
+	}
+	if playerHistOut.Items[0].HostFaction != "Clan Wolf" || playerHistOut.Items[0].PlayerFaction != "Clan Wolf" {
+		t.Fatalf("expected host/player faction Clan Wolf for host, got host=%s player=%s", playerHistOut.Items[0].HostFaction, playerHistOut.Items[0].PlayerFaction)
+	}
+
+	player2HistReq := httptest.NewRequest(http.MethodGet, "/players/"+strconv.FormatInt(p2, 10)+"/lobbies-history?limit=10&offset=0", nil)
+	player2HistRec := httptest.NewRecorder()
+	handler.ServeHTTP(player2HistRec, player2HistReq)
+	if player2HistRec.Code != http.StatusOK {
+		t.Fatalf("player2 lobbies history expected %d, got %d, body=%s", http.StatusOK, player2HistRec.Code, player2HistRec.Body.String())
+	}
+	var player2HistOut struct {
+		Items []struct {
+			HostFaction   string `json:"hostFaction"`
+			PlayerFaction string `json:"playerFaction"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(player2HistRec.Body.Bytes(), &player2HistOut); err != nil {
+		t.Fatalf("unmarshal player2 lobbies history: %v", err)
+	}
+	if len(player2HistOut.Items) != 1 {
+		t.Fatalf("expected one history item for player2, got %d", len(player2HistOut.Items))
+	}
+	if player2HistOut.Items[0].HostFaction != "Clan Wolf" || player2HistOut.Items[0].PlayerFaction != "Clan Jade Falcon" {
+		t.Fatalf("expected hostFaction Clan Wolf and playerFaction Clan Jade Falcon, got host=%s player=%s", player2HistOut.Items[0].HostFaction, player2HistOut.Items[0].PlayerFaction)
+	}
+	historyID := playerHistOut.Items[0].ID
+
+	historyReq := httptest.NewRequest(http.MethodGet, "/lobbies-history/"+strconv.FormatInt(historyID, 10), nil)
+	historyRec := httptest.NewRecorder()
+	handler.ServeHTTP(historyRec, historyReq)
+	if historyRec.Code != http.StatusOK {
+		t.Fatalf("lobby history by id expected %d, got %d, body=%s", http.StatusOK, historyRec.Code, historyRec.Body.String())
+	}
+	var historyOut struct {
+		Lobby struct {
+			ID            int64  `json:"id"`
+			MeetingPlace  string `json:"meetingPlace"`
+			RatingApplied bool   `json:"ratingApplied"`
+		} `json:"lobby"`
+		Players []struct {
+			PlayerID int64 `json:"playerId"`
+		} `json:"players"`
+	}
+	if err := json.Unmarshal(historyRec.Body.Bytes(), &historyOut); err != nil {
+		t.Fatalf("unmarshal lobby history: %v", err)
+	}
+	if historyOut.Lobby.ID != historyID || historyOut.Lobby.MeetingPlace != "Main Club" {
+		t.Fatalf("unexpected lobby history response")
+	}
+	if len(historyOut.Players) != 2 {
+		t.Fatalf("expected 2 players in lobby history, got %d", len(historyOut.Players))
+	}
+
+	playersReq := httptest.NewRequest(http.MethodGet, "/lobbies-history/"+strconv.FormatInt(historyID, 10)+"/players", nil)
+	playersRec := httptest.NewRecorder()
+	handler.ServeHTTP(playersRec, playersReq)
+	if playersRec.Code != http.StatusOK {
+		t.Fatalf("lobby history players expected %d, got %d, body=%s", http.StatusOK, playersRec.Code, playersRec.Body.String())
+	}
+	var playersOut struct {
+		LobbyHistoryID int64 `json:"lobbyHistoryId"`
+		Players        []struct {
+			PlayerID int64 `json:"playerId"`
+		} `json:"players"`
+	}
+	if err := json.Unmarshal(playersRec.Body.Bytes(), &playersOut); err != nil {
+		t.Fatalf("unmarshal lobby history players: %v", err)
+	}
+	if playersOut.LobbyHistoryID != historyID || len(playersOut.Players) != 2 {
+		t.Fatalf("unexpected lobby history players response: lobbyHistoryId=%d players=%d", playersOut.LobbyHistoryID, len(playersOut.Players))
+	}
+}
+
+func TestRankedResultAppliesGlickoOnce(t *testing.T) {
+	database, handler := setupTestServer(t)
+
+	createPlayer := func(t *testing.T, nickname string) int64 {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{
+			"fullName":          "Player " + nickname,
+			"nickname":          nickname,
+			"city":              "Moscow",
+			"contacts":          "@" + nickname,
+			"preferredLocation": "Main Club",
+			"password":          "StrongPass123!",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/players", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create player expected %d, got %d, body=%s", http.StatusCreated, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
 		return out.ID
 	}
@@ -955,7 +1130,9 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("login expected %d, got %d", http.StatusOK, rec.Code)
 		}
-		var out struct{ Token string `json:"token"` }
+		var out struct {
+			Token string `json:"token"`
+		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
 		return out.Token
 	}
@@ -970,12 +1147,15 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 	createLobbyPayload, _ := json.Marshal(rankedLobby)
 	createReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(createLobbyPayload))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Bearer "+p1Token)
 	createRec := httptest.NewRecorder()
 	handler.ServeHTTP(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
 		t.Fatalf("create ranked lobby expected %d, got %d, body=%s", http.StatusCreated, createRec.Code, createRec.Body.String())
 	}
-	var lobby struct{ ID int64 `json:"id"` }
+	var lobby struct {
+		ID int64 `json:"id"`
+	}
 	_ = json.Unmarshal(createRec.Body.Bytes(), &lobby)
 
 	rankedJoin := map[string]any{"playerId": p2}
@@ -1028,14 +1208,6 @@ func TestRankedResultAppliesGlickoOnce(t *testing.T) {
 		t.Fatalf("expected loser rating decrease: old=%d new=%d", oldR2, newR2)
 	}
 
-	var historyCount int
-	if err := database.QueryRow(`SELECT COUNT(1) FROM lobbies_history WHERE original_lobby_id = $1`, lobby.ID).Scan(&historyCount); err != nil {
-		t.Fatalf("count ranked lobby history rows: %v", err)
-	}
-	if historyCount != 1 {
-		t.Fatalf("expected finished ranked lobby to be archived once, got %d rows", historyCount)
-	}
-
 	var origRanked bool
 	var origMeeting string
 	var origMissionID sql.NullInt64
@@ -1047,23 +1219,8 @@ WHERE id = $1
 `, lobby.ID).Scan(&origRanked, &origMeeting, &origMissionID, &origCustomMission, &origCustomWeather, &origCustomAtmos); err != nil {
 		t.Fatalf("load original ranked lobby fields: %v", err)
 	}
-	var histRanked bool
-	var histMeeting string
-	var histMissionID sql.NullInt64
-	var histCustomMission, histCustomWeather, histCustomAtmos sql.NullString
-	if err := database.QueryRow(`
-SELECT is_ranked, meeting_place, mission_condition_id, custom_mission_name, custom_weather_name, custom_atmosphere_name
-FROM lobbies_history
-WHERE original_lobby_id = $1
-`, lobby.ID).Scan(&histRanked, &histMeeting, &histMissionID, &histCustomMission, &histCustomWeather, &histCustomAtmos); err != nil {
-		t.Fatalf("load archived ranked lobby fields: %v", err)
-	}
-	if origRanked != histRanked || origMeeting != histMeeting ||
-		origMissionID.Int64 != histMissionID.Int64 || origMissionID.Valid != histMissionID.Valid ||
-		origCustomMission.String != histCustomMission.String || origCustomMission.Valid != histCustomMission.Valid ||
-		origCustomWeather.String != histCustomWeather.String || origCustomWeather.Valid != histCustomWeather.Valid ||
-		origCustomAtmos.String != histCustomAtmos.String || origCustomAtmos.Valid != histCustomAtmos.Valid {
-		t.Fatalf("archived ranked lobby fields mismatch original")
+	if !origRanked || origMeeting == "" {
+		t.Fatalf("expected ranked lobby fields to stay in lobbies after finish")
 	}
 
 	// second attempt must fail (rating_applied protection)

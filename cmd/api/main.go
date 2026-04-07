@@ -1,25 +1,29 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
 	"solaris-matchmaking/internal/db"
 	"solaris-matchmaking/internal/httpapi"
+	"solaris-matchmaking/internal/logx"
 )
 
 func main() {
+	logx.SetupFromEnv()
+
 	databaseURL := getenv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/solaris_matchmaking?sslmode=disable")
 
 	database, err := db.OpenAndMigrate(databaseURL)
 	if err != nil {
-		log.Fatalf("database init failed: %v", err)
+		slog.Error("database init failed", "err", err)
+		os.Exit(1)
 	}
 	defer database.Close()
 
-	handler := httpapi.NewRouter(database)
+	handler := logx.HTTPAccess(httpapi.NewRouter(database))
 
 	server := &http.Server{
 		Addr:              ":8080",
@@ -27,9 +31,10 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("server started on %s", server.Addr)
+	slog.Info("server started", "addr", server.Addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server failed: %v", err)
+		slog.Error("server failed", "err", err)
+		os.Exit(1)
 	}
 }
 
