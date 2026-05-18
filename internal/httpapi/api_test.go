@@ -162,6 +162,99 @@ func TestRegisterPlayerAndCreateLobbyFlow(t *testing.T) {
 	}
 }
 
+func TestListLobbies(t *testing.T) {
+	_, handler := setupTestServer(t)
+
+	createPlayerBody := map[string]any{
+		"fullName":          "List Lobby Player",
+		"nickname":          "ListLobbyGuard",
+		"city":              "Moscow",
+		"contacts":          "@listlobby",
+		"preferredLocation": "North Club",
+		"password":          "StrongPass123!",
+	}
+	playerPayload, _ := json.Marshal(createPlayerBody)
+	playerReq := httptest.NewRequest(http.MethodPost, "/players", bytes.NewReader(playerPayload))
+	playerReq.Header.Set("Content-Type", "application/json")
+	playerRec := httptest.NewRecorder()
+	handler.ServeHTTP(playerRec, playerReq)
+	if playerRec.Code != http.StatusCreated {
+		t.Fatalf("create player: expected %d, got %d, body=%s", http.StatusCreated, playerRec.Code, playerRec.Body.String())
+	}
+	var playerResp struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(playerRec.Body.Bytes(), &playerResp); err != nil {
+		t.Fatalf("unmarshal player: %v", err)
+	}
+	playerToken := loginTestToken(t, handler, "ListLobbyGuard", "StrongPass123!")
+
+	createLobbyBody := map[string]any{
+		"hostPlayerId": playerResp.ID,
+		"meetingPlace": "List Club",
+		"matchSize":    350,
+	}
+	createLobbyBody[fmt.Sprintf("player%d", playerResp.ID)] = map[string]any{"faction": "Clan Wolf"}
+	lobbyPayload, _ := json.Marshal(createLobbyBody)
+	lobbyReq := httptest.NewRequest(http.MethodPost, "/lobbies", bytes.NewReader(lobbyPayload))
+	lobbyReq.Header.Set("Content-Type", "application/json")
+	lobbyReq.Header.Set("Authorization", "Bearer "+playerToken)
+	lobbyRec := httptest.NewRecorder()
+	handler.ServeHTTP(lobbyRec, lobbyReq)
+	if lobbyRec.Code != http.StatusCreated {
+		t.Fatalf("create lobby: expected %d, got %d, body=%s", http.StatusCreated, lobbyRec.Code, lobbyRec.Body.String())
+	}
+	var createdLobby map[string]any
+	if err := json.Unmarshal(lobbyRec.Body.Bytes(), &createdLobby); err != nil {
+		t.Fatalf("unmarshal created lobby: %v", err)
+	}
+	lobbyID := int64(createdLobby["id"].(float64))
+
+	listReq := httptest.NewRequest(http.MethodGet, "/lobbies?limit=50&offset=0&sort=id_desc", nil)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list lobbies: expected %d, got %d, body=%s", http.StatusOK, listRec.Code, listRec.Body.String())
+	}
+	var listOut struct {
+		Total int              `json:"total"`
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listOut); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if listOut.Total < 1 || len(listOut.Items) < 1 {
+		t.Fatalf("expected at least one lobby, total=%d items=%d", listOut.Total, len(listOut.Items))
+	}
+	found := false
+	for _, item := range listOut.Items {
+		if int64(item["id"].(float64)) == lobbyID {
+			found = true
+			if item["status"] != "open" {
+				t.Fatalf("expected open status, got %v", item["status"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("created lobby id %d not found in list", lobbyID)
+	}
+
+	openReq := httptest.NewRequest(http.MethodGet, "/lobbies?status=open", nil)
+	openRec := httptest.NewRecorder()
+	handler.ServeHTTP(openRec, openReq)
+	if openRec.Code != http.StatusOK {
+		t.Fatalf("list open lobbies: expected %d, got %d", http.StatusOK, openRec.Code)
+	}
+
+	badStatusReq := httptest.NewRequest(http.MethodGet, "/lobbies?status=unknown", nil)
+	badStatusRec := httptest.NewRecorder()
+	handler.ServeHTTP(badStatusRec, badStatusReq)
+	if badStatusRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status: expected %d, got %d", http.StatusBadRequest, badStatusRec.Code)
+	}
+}
+
 func TestCreateLobbyFailsForUnknownHostPlayer(t *testing.T) {
 	_, handler := setupTestServer(t)
 

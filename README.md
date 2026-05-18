@@ -418,40 +418,54 @@ go run ./cmd/admin list-admins
 
 ## 7.3) Каталог HTTP-ручек (сводка)
 
-Ниже все маршруты, которые реально обрабатывает API (базовый путь в проде — ваш хост, локально обычно `http://localhost:8080`). Подробные тела запросов/ответов — в **п. 8** и **п. 9**.
+Базовый URL локально: **`http://localhost:8080`**. Подробные примеры JSON — в **п. 8** (публичные) и **п. 9** (админ).
 
-### Публичные (без роли admin)
+**Авторизация в таблице:**
 
-| Метод | Путь |
-|--------|------|
-| `GET` | `/health` |
-| `POST` | `/auth/login` |
-| `POST` | `/players` |
-| `GET` | `/players/{id}` |
-| `GET` | `/players/{id}/faction-experience` |
-| `GET` | `/players/{id}/lobbies-history` |
-| `POST` | `/lobbies` |
-| `GET` | `/lobbies/{id}` |
-| `GET` | `/lobbies-history/{id}` |
-| `GET` | `/lobbies-history/{id}/players` |
-| `GET` | `/mission-conditions` |
-| `POST` | `/lobbies/{id}/random-condition` |
-| `POST` | `/lobbies/{id}/join` |
-| `PUT` | `/lobbies/{id}/conditions` |
-| `POST` | `/lobbies/{id}/ready` |
-| `POST` | `/lobbies/{id}/match-finished` |
-| `POST` | `/lobbies/{id}/ranked-result` |
+| Обозначение | Значение |
+|-------------|----------|
+| — | JWT не нужен |
+| JWT | `Authorization: Bearer <token>`, роль `player` или `admin` |
+| JWT (self) | JWT обязателен; **`playerId` в теле** (если есть) **= `playerId` из токена** |
+| JWT (участник) | JWT обязателен; вызывающий должен быть одним из двух игроков лобби |
+| admin | JWT с ролью **`admin`** |
 
-Для **`create lobby`**, **`join`**, **`ready`**, **`match-finished`**, **`ranked-result`** нужен заголовок **`Authorization: Bearer <JWT>`**. Для действий с `playerId` в теле (где требуется) он должен совпадать с токеном.
+Отдельной ручки **`GET /me`** нет: после логина фронт хранит **`token`** и **`playerId`** из ответа **`POST /auth/login`**.
 
-### Админские (JWT + роль `admin`)
+CORS включён для браузерного фронта (`OPTIONS` + заголовки `Authorization`, `Content-Type`).
 
-| Метод | Путь |
-|--------|------|
-| `GET` | `/admin/players` |
-| `PUT` | `/admin/players/{id}/rank` |
-| `DELETE` | `/admin/players/{id}` |
-| `DELETE` | `/admin/lobbies/{id}` |
+### Все маршруты
+
+| Метод | Путь | Auth | Назначение |
+|--------|------|------|------------|
+| `GET` | `/health` | — | Проверка, что API жив |
+| `POST` | `/auth/login` | — | Вход, выдача JWT на 24 ч |
+| `POST` | `/players` | — | Регистрация игрока |
+| `GET` | `/players/{id}` | — | Профиль игрока |
+| `GET` | `/players/{id}/faction-experience` | — | Опыт по фракциям (пагинация) |
+| `GET` | `/players/{id}/lobbies-history` | — | Список **завершённых** матчей игрока |
+| `GET` | `/lobbies` | — | **Список лобби** (главная, фильтры, пагинация) |
+| `POST` | `/lobbies` | JWT (self) | Создать лобби (хост + фракция в `player{hostId}`) |
+| `GET` | `/lobbies/{id}` | — | Одно лобби по id |
+| `POST` | `/lobbies/{id}/join` | JWT (self) | Войти в лобби + выбрать фракцию |
+| `POST` | `/lobbies/{id}/ready` | JWT (self) | Игрок готов; при 2/2 ready → `started` |
+| `POST` | `/lobbies/{id}/match-finished` | JWT (self) | Игрок завершил матч (casual); при 2/2 → опыт |
+| `POST` | `/lobbies/{id}/ranked-result` | JWT (участник) | Итог ranked-матча (Glicko), один раз |
+| `POST` | `/lobbies/{id}/random-condition` | — | Случайное условие миссии (только casual) |
+| `PUT` | `/lobbies/{id}/conditions` | — | Кастомные условия (только casual) |
+| `GET` | `/mission-conditions` | — | Справочник активных условий миссий |
+| `GET` | `/lobbies-history/{id}` | — | Карточка **завершённого** лобби + игроки |
+| `GET` | `/lobbies-history/{id}/players` | — | Только состав завершённого лобби |
+| `GET` | `/admin/players` | admin | Список игроков (админка) |
+| `PUT` | `/admin/players/{id}/rank` | admin | Выдать звание |
+| `DELETE` | `/admin/players/{id}` | admin | Удалить игрока |
+| `DELETE` | `/admin/lobbies/{id}` | admin | Удалить лобби |
+
+**Главная страница:** `GET /lobbies?status=open&sort=id_desc` — без токена, в `items[]` полные объекты лобби (как `GET /lobbies/{id}`).
+
+**Фракции участников** хранятся в **`lobby_players.faction_name`**, в JSON — в **`player{playerId}.faction`**. Поле **`lobbies.faction`** — дублирование фракции хоста при создании; для UI и опыта опирайтесь на **`player*`** / history **`players[]`**.
+
+**История:** отдельной таблицы `lobbies_history` нет; эндпоинты `*/lobbies-history/*` читают **`lobbies`** со `status = 'finished'` и **`lobby_players`**.
 
 ---
 
@@ -461,6 +475,8 @@ go run ./cmd/admin list-admins
 
 Ошибки в общем случае: JSON **`{"error":"..."}`** и соответствующий HTTP-код (`400`, `401`, `403`, `404`, `409`, `500` и т.д.).
 
+Сводная таблица всех ручек — **п. 7.3**. Ниже — детали по каждой: тела запросов, примеры ответов, query-параметры.
+
 См. также **п. 7.2** (фракции, место, время).
 
 ### 8.1 Health
@@ -468,6 +484,8 @@ go run ./cmd/admin list-admins
 | | |
 |---|---|
 | Метод и путь | `GET /health` |
+| Auth | не требуется |
+| Назначение | Healthcheck для мониторинга и фронта |
 | Тело запроса | нет |
 | Ответ `200` | `{"status":"ok"}` |
 
@@ -482,6 +500,8 @@ go run ./cmd/admin list-admins
 | | |
 |---|---|
 | Метод и путь | `POST /players` |
+| Auth | не требуется |
+| Назначение | Создать аккаунт игрока |
 | Успех | `201 Created` |
 | Заголовки | `Content-Type: application/json` |
 
@@ -528,7 +548,10 @@ go run ./cmd/admin list-admins
 | | |
 |---|---|
 | Метод и путь | `GET /players/{id}` |
+| Auth | не требуется |
+| Назначение | Профиль игрока для страницы аккаунта / после регистрации |
 | Тело запроса | нет |
+| Ошибки | `404` — игрок не найден |
 
 Ответ `200` — тот же состав полей, что в п. 8.2, плюс при наличии **`rankTitle`**, **`rankAttestedAt`**, **`collectionLink`**. Блок **`factionExperience`** подгружается из `player_faction_experience` (сортировка по имени фракции).
 
@@ -537,6 +560,9 @@ go run ./cmd/admin list-admins
 | | |
 |---|---|
 | Метод и путь | `POST /auth/login` |
+| Auth | не требуется |
+| Назначение | Получить JWT; фронт сохраняет **`token`**, **`playerId`**, **`role`** |
+| Ошибки | `401` — неверный nickname/password |
 
 Тело запроса:
 
@@ -564,7 +590,10 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 | | |
 |---|---|
 | Метод и путь | `POST /lobbies` |
+| Auth | JWT; **`hostPlayerId` = `playerId` из токена** |
+| Назначение | Создать лобби; хост сразу попадает в `lobby_players` |
 | Заголовок | `Authorization: Bearer <token>` (обязателен) |
+| Успех | `201 Created` |
 
 Тело (casual / ranked отличается только **`isRanked`**):
 
@@ -581,13 +610,68 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 Ключ **`player1`** здесь потому, что **`hostPlayerId` равен 1**. Для хоста с id `7` используйте **`player7`**, и т.д.
 `hostPlayerId` обязательно должен совпадать с `playerId` из токена, иначе `403 forbidden`.
 
-Ответ `201` — объект лобби (как в п. 8.6). Обязательны **`hostPlayerId`**, **`meetingPlace`**, **`player{hostPlayerId}.faction`** и **`matchSize`**.
+Ответ `201` — объект лобби (как в п. 8.7). Обязательны **`hostPlayerId`**, **`meetingPlace`**, **`player{hostPlayerId}.faction`** и **`matchSize`**.
 
-### 8.6 Получить лобби
+### 8.6 Список лобби
+
+| | |
+|---|---|
+| Метод и путь | `GET /lobbies` |
+| Auth | не требуется |
+| Назначение | **Главная страница** — список лобби без знания id заранее |
+| Тело запроса | нет |
+
+Query-параметры (все опциональны):
+
+| Параметр | Значения | По умолчанию |
+|----------|----------|--------------|
+| `status` | `open`, `started`, `finished` | все статусы |
+| `sort` | `id_desc`, `id_asc`, `created_desc`, `created_asc`, `updated_desc`, `updated_asc` | `id_desc` |
+| `limit` | 1–200 | `50` |
+| `offset` | ≥ 0 | `0` |
+
+Ответ `200` — пагинированный список. Каждый элемент в **`items`** имеет тот же формат, что и **`GET /lobbies/{id}`** (участники под ключами **`player{id}`**).
+
+```json
+{
+  "sort": "id_desc",
+  "limit": 50,
+  "offset": 0,
+  "total": 2,
+  "items": [
+    {
+      "id": 2,
+      "hostPlayerId": 1,
+      "player1": {
+        "playerId": 1,
+        "faction": "Clan Wolf",
+        "isReady": false,
+        "isFinished": false,
+        "joinedAt": "2026-03-28T12:10:00Z"
+      },
+      "matchSize": 350,
+      "isRanked": false,
+      "meetingPlace": "Main Club",
+      "status": "open",
+      "createdAt": "2026-03-28T12:10:00Z",
+      "updatedAt": "2026-03-28T12:10:00Z"
+    }
+  ]
+}
+```
+
+При фильтре по статусу в ответ добавляется поле **`status`** (например `"open"`).
+
+Для главной страницы обычно достаточно **`GET /lobbies?status=open&sort=id_desc`**.
+
+### 8.7 Получить лобби
 
 | | |
 |---|---|
 | Метод и путь | `GET /lobbies/{id}` |
+| Auth | не требуется |
+| Назначение | Страница / модалка одного лобби; polling состояния матча |
+| Ошибки | `404` — лобби не найдено |
 
 Ответ `200` — пример для лобби с случайным условием миссии и двумя игроками. Каждый участник лежит под ключом **`player` + его `playerId`** (те же правила, что при создании и join). Массива **`players`** в JSON нет.
 
@@ -630,11 +714,13 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 
 Если заданы кастомные условия, будут поля **`customMissionName`**, **`customWeatherName`**, **`customAtmosphereName`**, а **`missionConditionId`** может быть `null`.
 
-### 8.7 Получить активные условия миссий
+### 8.8 Получить активные условия миссий
 
 | | |
 |---|---|
 | Метод и путь | `GET /mission-conditions` |
+| Auth | не требуется |
+| Назначение | Справочник для UI выбора / подсказок (casual) |
 
 Ответ `200` — JSON-массив (только **`is_active = true`**):
 
@@ -649,22 +735,26 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 ]
 ```
 
-### 8.8 Random условие для без-MMR лобби
+### 8.9 Random условие для без-MMR лобби
 
 | | |
 |---|---|
 | Метод и путь | `POST /lobbies/{id}/random-condition` |
+| Auth | не требуется |
+| Назначение | Назначить случайное условие миссии (casual) |
 | Тело запроса | нет |
-| JWT | не требуется |
 
-Выбирается **одна** случайная строка из `mission_conditions` (`ORDER BY random() LIMIT 1`). Ответ `200` — обновлённое лобби (как п. 8.6). Для **`isRanked=true`** вернётся ошибка.
+Выбирается **одна** случайная строка из `mission_conditions` (`ORDER BY random() LIMIT 1`). Ответ `200` — обновлённое лобби (как п. 8.7). Для **`isRanked=true`** вернётся ошибка.
 
-### 8.9 Вход в лобби (игрок выбирает фракцию)
+### 8.10 Вход в лобби (игрок выбирает фракцию)
 
 | | |
 |---|---|
 | Метод и путь | `POST /lobbies/{id}/join` |
+| Auth | JWT; **`playerId` в теле = `playerId` из токена** |
+| Назначение | Второй игрок входит; фракция пишется в **`lobby_players`** |
 | Заголовок | `Authorization: Bearer <token>` |
+| Ошибки | `400` — лобби уже полное (2 игрока) |
 
 Тело ( **`playerId` должен совпадать с JWT** ). Ключ с фракцией **обязан совпадать с `playerId`**:
 
@@ -679,11 +769,13 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 
 Ответ `200` — полное лобби. В лобби не более **двух** участников.
 
-### 8.10 Кастомные условия (только non-MMR)
+### 8.11 Кастомные условия (только non-MMR)
 
 | | |
 |---|---|
 | Метод и путь | `PUT /lobbies/{id}/conditions` |
+| Auth | не требуется |
+| Назначение | Задать текстовые условия вместо random mission |
 
 Тело:
 
@@ -697,11 +789,13 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 
 Ответ `200` — лобби; **`mission_condition_id`** сбрасывается в `NULL`, заполняются три текстовых поля кастома. Для ranked — ошибка.
 
-### 8.11 Кнопка «Готов»
+### 8.12 Кнопка «Готов»
 
 | | |
 |---|---|
 | Метод и путь | `POST /lobbies/{id}/ready` |
+| Auth | JWT; **`playerId` в теле = `playerId` из токена** |
+| Назначение | Отметить готовность; 2/2 ready → **`status: started`** |
 | Заголовок | `Authorization: Bearer <token>` |
 
 Тело:
@@ -714,11 +808,13 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 
 Ответ `200` — лобби. Если **2** игрока и оба готовы — **`status`** станет **`started`**, выставится **`startedAt`**.
 
-### 8.12 Кнопка «Матч завершен»
+### 8.13 Кнопка «Матч завершен»
 
 | | |
 |---|---|
 | Метод и путь | `POST /lobbies/{id}/match-finished` |
+| Auth | JWT; **`playerId` в теле = `playerId` из токена** |
+| Назначение | Casual: отметка завершения; 2/2 → опыт по **`lobby_players.faction_name`** |
 | Заголовок | `Authorization: Bearer <token>` |
 
 Тело:
@@ -731,11 +827,13 @@ JWT живёт **24 часа** от момента выдачи (см. `internal
 
 Ответ `200` — лобби. Когда **оба** игрока отметили завершение и матч ещё не был **`finished`**: **`status` → `finished`**, **`finishedAt`**, **`+1` total_experience**, обновление **`players.factions`** и **`player_faction_experience`**. Для ranked рейтинг через этот endpoint **не** меняется (см. **`ranked-result`**).
 
-### 8.13 Получить опыт по фракциям (пагинация)
+### 8.14 Получить опыт по фракциям (пагинация)
 
 | | |
 |---|---|
 | Метод и путь | `GET /players/{id}/faction-experience` |
+| Auth | не требуется |
+| Назначение | Таблица/виджет прогресса по фракциям на профиле |
 
 Query-параметры:
 - **`sort`**: `exp_desc` (по умолчанию), `exp_asc`, `faction_asc`, `faction_desc`
@@ -761,13 +859,17 @@ Query-параметры:
 }
 ```
 
-### 8.13.1 История завершённых лобби игрока
+### 8.14.1 История завершённых лобби игрока
 
 | | |
 |---|---|
 | Метод и путь | `GET /players/{id}/lobbies-history` |
+| Auth | не требуется |
+| Назначение | Список завершённых матчей для профиля игрока |
 
-Источник данных: `lobbies` + `lobby_players` с фильтром `status='finished'`.
+Источник данных: таблицы **`lobbies`** + **`lobby_players`**, только `status='finished'`.  
+**`hostFaction`** — фракция хоста из **`lobby_players`** (fallback: `lobbies.faction`).  
+**`playerFaction`** — фракция **запрашиваемого** игрока в этом матче из **`lobby_players`**.
 
 Query-параметры:
 - **`sort`**: `finished_desc` (по умолчанию), `finished_asc`, `id_desc`, `id_asc`
@@ -785,7 +887,7 @@ Query-параметры:
   "total": 1,
   "items": [
     {
-      "id": 1,
+      "id": 10,
       "originalLobbyId": 10,
       "hostPlayerId": 1,
       "hostFaction": "Clan Wolf",
@@ -799,20 +901,22 @@ Query-параметры:
 }
 ```
 
-### 8.13.2 Карточка завершённого лобби
+### 8.14.2 Карточка завершённого лобби
 
 | | |
 |---|---|
 | Метод и путь | `GET /lobbies-history/{id}` |
+| Auth | не требуется |
+| Назначение | Детали завершённого матча + массив **`players`** с фракциями |
 
-`{id}` здесь — это `lobbies.id` завершённого лобби.
+`{id}` — **`lobbies.id`** завершённого лобби (`status = 'finished'`). Отдельной таблицы истории нет.
 
 Ответ `200`:
 
 ```json
 {
   "lobby": {
-    "id": 1,
+    "id": 10,
     "originalLobbyId": 10,
     "status": "finished",
     "meetingPlace": "Main Club"
@@ -824,11 +928,13 @@ Query-параметры:
 }
 ```
 
-### 8.13.3 Состав игроков завершённого лобби
+### 8.14.3 Состав игроков завершённого лобби
 
 | | |
 |---|---|
 | Метод и путь | `GET /lobbies-history/{id}/players` |
+| Auth | не требуется |
+| Назначение | Только участники завершённого лобби (без метаданных лобби) |
 
 Ответ `200`:
 
@@ -842,12 +948,15 @@ Query-параметры:
 }
 ```
 
-### 8.14 Зафиксировать результат ranked-матча (Glicko)
+### 8.15 Зафиксировать результат ranked-матча (Glicko)
 
 | | |
 |---|---|
 | Метод и путь | `POST /lobbies/{id}/ranked-result` |
-| Заголовок | `Authorization: Bearer <token>` (должен быть участник лобби) |
+| Auth | JWT; вызывающий — один из двух игроков лобби |
+| Назначение | Ranked: пересчёт рейтинга Glicko-1, `rating_applied = true` |
+| Заголовок | `Authorization: Bearer <token>` |
+| Ошибки | `400` — не ranked, рейтинг уже применён, не 2 игрока |
 
 Победа:
 
@@ -883,6 +992,8 @@ Query-параметры:
 | | |
 |---|---|
 | Метод и путь | `GET /admin/players` |
+| Auth | JWT, роль **`admin`** |
+| Назначение | Таблица игроков в админ-панели |
 | Тело запроса | нет |
 
 Query-параметры (как у **`GET /players/{id}/faction-experience`**):
@@ -917,6 +1028,8 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 | | |
 |---|---|
 | Метод и путь | `PUT /admin/players/{id}/rank` |
+| Auth | JWT, роль **`admin`** |
+| Назначение | Выдать/изменить звание в профиле |
 
 Тело запроса (оба поля обязательны, произвольные строки):
 
@@ -934,6 +1047,8 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 | | |
 |---|---|
 | Метод и путь | `DELETE /admin/lobbies/{id}` |
+| Auth | JWT, роль **`admin`** |
+| Назначение | Удалить лобби и связанных участников (каскад) |
 | Тело запроса | нет |
 
 Ответ **`204`**. В теле при этом всё равно может уйти небольшой JSON `{"status":"deleted"}` (особенность текущей реализации `writeJSON`).
@@ -945,6 +1060,8 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 | | |
 |---|---|
 | Метод и путь | `DELETE /admin/players/{id}` |
+| Auth | JWT, роль **`admin`** |
+| Назначение | Удалить игрока; сначала удаляются лобби, где он хост |
 
 Ответ **`204`**. Перед удалением игрока API удаляет его лобби в **`lobbies`** где он хост; дальше срабатывает **`DELETE FROM players`** (остальное — каскады FK в БД).
 
@@ -956,12 +1073,13 @@ Query-параметры (как у **`GET /players/{id}/faction-experience`**):
 
 1. `POST /players` - регистрация
 2. `POST /auth/login` - логин и получение токена
-3. `POST /lobbies` - создание лобби
-4. Второй игрок: `POST /lobbies/{id}/join` с телом **`playerId` + `player{playerId}.faction`**
-5. Для `isRanked=false`: либо `POST /lobbies/{id}/random-condition`, либо `PUT /lobbies/{id}/conditions`
-6. Оба игрока: `POST /lobbies/{id}/ready`
-7. После матча оба игрока: `POST /lobbies/{id}/match-finished`
-8. `GET /lobbies/{id}` и `GET /players/{id}/faction-experience` для обновления UI статистики
+3. `GET /lobbies` — список лобби для главной (без id из БД)
+4. `POST /lobbies` - создание лобби
+5. Второй игрок: `POST /lobbies/{id}/join` с телом **`playerId` + `player{playerId}.faction`**
+6. Для `isRanked=false`: либо `POST /lobbies/{id}/random-condition`, либо `PUT /lobbies/{id}/conditions`
+7. Оба игрока: `POST /lobbies/{id}/ready`
+8. После матча оба игрока: `POST /lobbies/{id}/match-finished`
+9. `GET /lobbies` (обновить список), `GET /lobbies/{id}` и `GET /players/{id}/faction-experience` для UI
 
 ### 10.2 Админский flow
 
@@ -1023,6 +1141,7 @@ go test ./... -v 2>&1 | Tee-Object -FilePath test-results.txt
 |------|----------------|
 | `TestHealthEndpoint` | `GET /health` возвращает успех |
 | `TestRegisterPlayerAndCreateLobbyFlow` | регистрация игрока и создание лобби хостом |
+| `TestListLobbies` | `GET /lobbies` — список, фильтр `status=open`, валидация query |
 | `TestCreateLobbyFailsForUnknownHostPlayer` | создание лобби с несуществующим `hostPlayerId` отклоняется |
 | `TestMissionConditionsOnlyForCasualLobbies` | условия миссий / random-condition только для лобби без MMR (`isRanked=false`) |
 | `TestAdminSetRankAndDeleteLobbyAndPlayer` | админ: список игроков `GET /admin/players`, звание, удаление лобби, удаление игрока |
@@ -1059,5 +1178,5 @@ go test ./... -v 2>&1 | Tee-Object -FilePath test-results.txt
 - refresh tokens и ротация JWT
 - ограничение/валидация `matchSize` по правилам игры
 - полноценный CRUD для `mission_conditions` из админ-панели
-- пагинация/фильтрация списка лобби и игроков
+- публичный список игроков (сейчас только `GET /admin/players`)
 - аудит-лог админских действий

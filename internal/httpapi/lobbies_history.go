@@ -121,12 +121,13 @@ WHERE lp.player_id = $1
 
 	rows, err := a.db.Query(`
 SELECT
-	l.id, l.id AS original_lobby_id, l.host_player_id, l.faction, lp.faction_name, l.match_size,
+	l.id, l.id AS original_lobby_id, l.host_player_id, COALESCE(host_lp.faction_name, l.faction) AS host_faction, lp.faction_name, l.match_size,
 	l.status, l.created_at, l.updated_at, l.is_ranked, l.meeting_place,
 	l.started_at, l.finished_at, l.rating_applied, l.mission_condition_id,
 	l.custom_mission_name, l.custom_weather_name, l.custom_atmosphere_name
 FROM lobbies l
 JOIN lobby_players lp ON lp.lobby_id = l.id
+LEFT JOIN lobby_players host_lp ON host_lp.lobby_id = l.id AND host_lp.player_id = l.host_player_id
 WHERE lp.player_id = $1
   AND l.status = 'finished'
 ORDER BY `+orderClause+`
@@ -174,13 +175,16 @@ func (a *api) getLobbyHistory(w http.ResponseWriter, r *http.Request) {
 
 	row := a.db.QueryRow(`
 SELECT
-	id, id AS original_lobby_id, host_player_id, faction, faction AS player_faction, match_size,
-	status, created_at, updated_at, is_ranked, meeting_place,
-	started_at, finished_at, rating_applied, mission_condition_id,
-	custom_mission_name, custom_weather_name, custom_atmosphere_name
-FROM lobbies
-WHERE id = $1
-  AND status = 'finished'
+	l.id, l.id AS original_lobby_id, l.host_player_id,
+	COALESCE(host_lp.faction_name, l.faction) AS host_faction,
+	COALESCE(host_lp.faction_name, l.faction) AS player_faction,
+	l.match_size, l.status, l.created_at, l.updated_at, l.is_ranked, l.meeting_place,
+	l.started_at, l.finished_at, l.rating_applied, l.mission_condition_id,
+	l.custom_mission_name, l.custom_weather_name, l.custom_atmosphere_name
+FROM lobbies l
+LEFT JOIN lobby_players host_lp ON host_lp.lobby_id = l.id AND host_lp.player_id = l.host_player_id
+WHERE l.id = $1
+  AND l.status = 'finished'
 `, lobbyID)
 	item, err := scanLobbyHistoryItem(row)
 	if err != nil {

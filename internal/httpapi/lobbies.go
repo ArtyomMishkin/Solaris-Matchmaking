@@ -178,6 +178,116 @@ type rankedResultRequest struct {
 	IsDraw         bool  `json:"isDraw"`
 }
 
+func (a *api) listLobbies(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	q := r.URL.Query()
+	sortBy := strings.ToLower(strings.TrimSpace(q.Get("sort")))
+	orderClause := "id DESC"
+	switch sortBy {
+	case "", "id_desc":
+		orderClause = "id DESC"
+	case "id_asc":
+		orderClause = "id ASC"
+	case "created_desc":
+		orderClause = "created_at DESC, id DESC"
+	case "created_asc":
+		orderClause = "created_at ASC, id ASC"
+	case "updated_desc":
+		orderClause = "updated_at DESC, id DESC"
+	case "updated_asc":
+		orderClause = "updated_at ASC, id ASC"
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid sort parameter"})
+		return
+	}
+
+	status := strings.ToLower(strings.TrimSpace(q.Get("status")))
+	if status != "" && status != "open" && status != "started" && status != "finished" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid status parameter"})
+		return
+	}
+
+	limit := 50
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		v, perr := strconv.Atoi(raw)
+		if perr != nil || v <= 0 || v > 200 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 200"})
+			return
+		}
+		limit = v
+	}
+	offset := 0
+	if raw := strings.TrimSpace(q.Get("offset")); raw != "" {
+		v, perr := strconv.Atoi(raw)
+		if perr != nil || v < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "offset must be >= 0"})
+			return
+		}
+		offset = v
+	}
+
+	var total int
+	var rows *sql.Rows
+	var err error
+	if status == "" {
+		if err = a.db.QueryRow(`SELECT COUNT(1) FROM lobbies`).Scan(&total); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to count lobbies"})
+			return
+		}
+		rows, err = a.db.Query(`SELECT id FROM lobbies ORDER BY `+orderClause+` LIMIT $1 OFFSET $2`, limit, offset)
+	} else {
+		if err = a.db.QueryRow(`SELECT COUNT(1) FROM lobbies WHERE status = $1`, status).Scan(&total); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to count lobbies"})
+			return
+		}
+		rows, err = a.db.Query(`SELECT id FROM lobbies WHERE status = $1 ORDER BY `+orderClause+` LIMIT $2 OFFSET $3`, status, limit, offset)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobbies"})
+		return
+	}
+	defer rows.Close()
+
+	items := make([]map[string]any, 0)
+	for rows.Next() {
+		var id int64
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read lobby ids"})
+			return
+		}
+		l, loadErr := a.getLobbyByID(id)
+		if loadErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby"})
+			return
+		}
+		items = append(items, lobbyToJSON(l))
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to iterate lobbies"})
+		return
+	}
+
+	sortOut := sortBy
+	if sortOut == "" {
+		sortOut = "id_desc"
+	}
+	resp := map[string]any{
+		"sort":   sortOut,
+		"limit":  limit,
+		"offset": offset,
+		"total":  total,
+		"items":  items,
+	}
+	if status != "" {
+		resp["status"] = status
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (a *api) createLobby(w http.ResponseWriter, r *http.Request) {
 	authPlayerID, err := a.requirePlayer(r)
 	if err != nil {

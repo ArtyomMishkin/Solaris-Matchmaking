@@ -95,11 +95,14 @@ func (a *api) playerByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) lobbies(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		a.listLobbies(w, r)
+	case http.MethodPost:
+		a.createLobby(w, r)
+	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
 	}
-	a.createLobby(w, r)
 }
 
 func (a *api) lobbyByID(w http.ResponseWriter, r *http.Request) {
