@@ -35,12 +35,11 @@ func NewRouter(db *sql.DB) http.Handler {
 	mux.HandleFunc("/players/", a.playerByID)
 	mux.HandleFunc("/lobbies", a.lobbies)
 	mux.HandleFunc("/lobbies/", a.lobbyByID)
+	mux.HandleFunc("/lobbies-history/", a.lobbyHistoryByID)
 	mux.HandleFunc("/mission-conditions", a.listMissionConditions)
 
 	mux.HandleFunc("/admin/players/", a.adminPlayersSubresource)
 	mux.HandleFunc("/admin/lobbies/", a.adminLobbiesSubresource)
-	mux.HandleFunc("/admin/lobbies-history", a.adminLobbiesHistoryCollection)
-	mux.HandleFunc("/admin/lobbies-history/", a.adminLobbiesHistorySubresource)
 	mux.HandleFunc("/admin/players", a.adminPlayersCollection)
 
 	return withCORS(mux)
@@ -55,7 +54,8 @@ func withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 		w.Header().Set("Access-Control-Max-Age", "600")
 
 		if r.Method == http.MethodOptions {
@@ -83,6 +83,10 @@ func (a *api) playerByID(w http.ResponseWriter, r *http.Request) {
 		a.getPlayerFactionExperience(w, r)
 		return
 	}
+	if strings.HasSuffix(strings.Trim(r.URL.Path, "/"), "lobbies-history") {
+		a.getPlayerLobbiesHistory(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -91,11 +95,14 @@ func (a *api) playerByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) lobbies(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		a.listLobbies(w, r)
+	case http.MethodPost:
+		a.createLobby(w, r)
+	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
 	}
-	a.createLobby(w, r)
 }
 
 func (a *api) lobbyByID(w http.ResponseWriter, r *http.Request) {

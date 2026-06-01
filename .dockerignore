@@ -1,0 +1,9 @@
+.git
+.gitignore
+docs/
+*.md
+!README.md
+Otchyot_*.docx
+**/*_test.go
+.cursor
+terminals/

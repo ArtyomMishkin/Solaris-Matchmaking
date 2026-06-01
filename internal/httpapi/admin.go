@@ -24,24 +24,6 @@ type adminPlayerSummary struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-type adminLobbyHistorySummary struct {
-	ID                 int64  `json:"id"`
-	OriginalLobbyID    int64  `json:"originalLobbyId"`
-	HostPlayerID       int64  `json:"hostPlayerId"`
-	Faction            string `json:"faction"`
-	MatchSize          int    `json:"matchSize"`
-	IsRanked           bool   `json:"isRanked"`
-	MeetingPlace       string `json:"meetingPlace"`
-	MissionConditionID *int64 `json:"missionConditionId,omitempty"`
-	CustomMissionName  string `json:"customMissionName,omitempty"`
-	CustomWeatherName  string `json:"customWeatherName,omitempty"`
-	CustomAtmosphere   string `json:"customAtmosphereName,omitempty"`
-	Status             string `json:"status"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
-	FinishedAt         string `json:"finishedAt,omitempty"`
-}
-
 func (a *api) adminPlayersCollection(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -230,11 +212,6 @@ WHERE id = $4
 		}
 		defer tx.Rollback()
 
-		_, err = tx.Exec(`DELETE FROM lobbies_history WHERE host_player_id = $1`, playerID)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete lobby history"})
-			return
-		}
 		_, err = tx.Exec(`DELETE FROM lobbies WHERE host_player_id = $1`, playerID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete lobbies"})
@@ -288,12 +265,6 @@ func (a *api) adminLobbiesSubresource(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// Delete from history by original_lobby_id and then remove the lobby itself.
-	_, err = tx.Exec(`DELETE FROM lobbies_history WHERE original_lobby_id = $1`, id)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete lobby history"})
-		return
-	}
 	_, err = tx.Exec(`DELETE FROM lobbies WHERE id = $1`, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete lobby"})
@@ -307,156 +278,3 @@ func (a *api) adminLobbiesSubresource(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusNoContent, map[string]string{"status": "deleted"})
 }
-
-func (a *api) adminLobbiesHistorySubresource(w http.ResponseWriter, r *http.Request) {
-	_, err := a.requireAdmin(r)
-	if err != nil {
-		if err.Error() == "forbidden" {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
-			return
-		}
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-
-	if r.Method != http.MethodDelete {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-
-	idStr := strings.TrimPrefix(r.URL.Path, "/admin/lobbies-history/")
-	id, err := strconv.ParseInt(strings.Trim(idStr, "/"), 10, 64)
-	if err != nil || id <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid lobby history id"})
-		return
-	}
-
-	_, err = a.db.Exec(`DELETE FROM lobbies_history WHERE id = $1`, id)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete lobby history"})
-		return
-	}
-
-	writeJSON(w, http.StatusNoContent, map[string]string{"status": "deleted"})
-}
-
-func (a *api) adminLobbiesHistoryCollection(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	_, err := a.requireAdmin(r)
-	if err != nil {
-		if err.Error() == "forbidden" {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
-			return
-		}
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-
-	q := r.URL.Query()
-	sortBy := strings.ToLower(strings.TrimSpace(q.Get("sort")))
-	orderClause := "id DESC"
-	switch sortBy {
-	case "", "id_desc":
-		orderClause = "id DESC"
-	case "id_asc":
-		orderClause = "id ASC"
-	case "finished_desc":
-		orderClause = "finished_at DESC, id DESC"
-	case "finished_asc":
-		orderClause = "finished_at ASC, id ASC"
-	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid sort parameter"})
-		return
-	}
-
-	limit := 50
-	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
-		v, perr := strconv.Atoi(raw)
-		if perr != nil || v <= 0 || v > 200 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 200"})
-			return
-		}
-		limit = v
-	}
-	offset := 0
-	if raw := strings.TrimSpace(q.Get("offset")); raw != "" {
-		v, perr := strconv.Atoi(raw)
-		if perr != nil || v < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "offset must be >= 0"})
-			return
-		}
-		offset = v
-	}
-
-	var total int
-	if err := a.db.QueryRow(`SELECT COUNT(1) FROM lobbies_history`).Scan(&total); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to count lobby history"})
-		return
-	}
-
-	rows, err := a.db.Query(`
-SELECT id, original_lobby_id, host_player_id, faction, match_size, is_ranked, meeting_place,
-       mission_condition_id, custom_mission_name, custom_weather_name, custom_atmosphere_name,
-       status, created_at, updated_at, finished_at
-FROM lobbies_history
-ORDER BY `+orderClause+`
-LIMIT $1 OFFSET $2
-`, limit, offset)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load lobby history"})
-		return
-	}
-	defer rows.Close()
-
-	var items []adminLobbyHistorySummary
-	for rows.Next() {
-		var it adminLobbyHistorySummary
-		var missionID sql.NullInt64
-		var customMission, customWeather, customAtmos, finishedAt sql.NullString
-		if scanErr := rows.Scan(
-			&it.ID, &it.OriginalLobbyID, &it.HostPlayerID, &it.Faction, &it.MatchSize,
-			&it.IsRanked, &it.MeetingPlace, &missionID, &customMission, &customWeather, &customAtmos,
-			&it.Status, &it.CreatedAt, &it.UpdatedAt, &finishedAt,
-		); scanErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read lobby history"})
-			return
-		}
-		if missionID.Valid {
-			v := missionID.Int64
-			it.MissionConditionID = &v
-		}
-		if customMission.Valid {
-			it.CustomMissionName = customMission.String
-		}
-		if customWeather.Valid {
-			it.CustomWeatherName = customWeather.String
-		}
-		if customAtmos.Valid {
-			it.CustomAtmosphere = customAtmos.String
-		}
-		if finishedAt.Valid {
-			it.FinishedAt = finishedAt.String
-		}
-		items = append(items, it)
-	}
-	if err := rows.Err(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to iterate lobby history"})
-		return
-	}
-
-	sortOut := sortBy
-	if sortOut == "" {
-		sortOut = "id_desc"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sort":   sortOut,
-		"limit":  limit,
-		"offset": offset,
-		"total":  total,
-		"items":  items,
-	})
-}
-

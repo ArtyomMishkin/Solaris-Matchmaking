@@ -165,71 +165,6 @@ ADD COLUMN IF NOT EXISTS meeting_place TEXT NOT NULL DEFAULT '';
 	}
 
 	_, err = database.Exec(`
-CREATE TABLE IF NOT EXISTS lobbies_history (
-    id BIGSERIAL PRIMARY KEY,
-    original_lobby_id BIGINT NOT NULL,
-    host_player_id BIGINT NOT NULL,
-    faction TEXT NOT NULL,
-    match_size INTEGER NOT NULL,
-    is_ranked BOOLEAN NOT NULL DEFAULT FALSE,
-    meeting_place TEXT NOT NULL DEFAULT '',
-    mission_condition_id BIGINT,
-    custom_mission_name TEXT,
-    custom_weather_name TEXT,
-    custom_atmosphere_name TEXT,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    finished_at TEXT
-);
-`)
-	if err != nil {
-		return fmt.Errorf("migrate lobbies_history table: %w", err)
-	}
-	_, err = database.Exec(`
-ALTER TABLE lobbies_history
-ADD COLUMN IF NOT EXISTS is_ranked BOOLEAN NOT NULL DEFAULT FALSE;
-`)
-	if err != nil {
-		return fmt.Errorf("add lobbies_history.is_ranked: %w", err)
-	}
-	_, err = database.Exec(`
-ALTER TABLE lobbies_history
-ADD COLUMN IF NOT EXISTS meeting_place TEXT NOT NULL DEFAULT '';
-`)
-	if err != nil {
-		return fmt.Errorf("add lobbies_history.meeting_place: %w", err)
-	}
-	_, err = database.Exec(`
-ALTER TABLE lobbies_history
-ADD COLUMN IF NOT EXISTS mission_condition_id BIGINT;
-`)
-	if err != nil {
-		return fmt.Errorf("add lobbies_history.mission_condition_id: %w", err)
-	}
-	_, err = database.Exec(`
-ALTER TABLE lobbies_history
-ADD COLUMN IF NOT EXISTS custom_mission_name TEXT;
-`)
-	if err != nil {
-		return fmt.Errorf("add lobbies_history.custom_mission_name: %w", err)
-	}
-	_, err = database.Exec(`
-ALTER TABLE lobbies_history
-ADD COLUMN IF NOT EXISTS custom_weather_name TEXT;
-`)
-	if err != nil {
-		return fmt.Errorf("add lobbies_history.custom_weather_name: %w", err)
-	}
-	_, err = database.Exec(`
-ALTER TABLE lobbies_history
-ADD COLUMN IF NOT EXISTS custom_atmosphere_name TEXT;
-`)
-	if err != nil {
-		return fmt.Errorf("add lobbies_history.custom_atmosphere_name: %w", err)
-	}
-
-	_, err = database.Exec(`
 CREATE TABLE IF NOT EXISTS mission_conditions (
     id BIGSERIAL PRIMARY KEY,
     mode_name TEXT NOT NULL,
@@ -256,6 +191,14 @@ CREATE TABLE IF NOT EXISTS lobby_players (
 `)
 	if err != nil {
 		return fmt.Errorf("migrate lobby_players table: %w", err)
+	}
+	_, err = database.Exec(`DROP TABLE IF EXISTS lobby_history_players;`)
+	if err != nil {
+		return fmt.Errorf("drop legacy lobby_history_players: %w", err)
+	}
+	_, err = database.Exec(`DROP TABLE IF EXISTS lobbies_history;`)
+	if err != nil {
+		return fmt.Errorf("drop legacy lobbies_history: %w", err)
 	}
 	_, err = database.Exec(`
 CREATE TABLE IF NOT EXISTS player_faction_experience (
@@ -323,12 +266,6 @@ CREATE INDEX IF NOT EXISTS idx_lobbies_host_player_id ON lobbies(host_player_id)
 		return fmt.Errorf("create lobbies index: %w", err)
 	}
 
-	_, err = database.Exec(`
-CREATE INDEX IF NOT EXISTS idx_lobbies_history_original_lobby_id ON lobbies_history(original_lobby_id);
-`)
-	if err != nil {
-		return fmt.Errorf("create lobbies_history index: %w", err)
-	}
 	_, err = database.Exec(`
 CREATE INDEX IF NOT EXISTS idx_mission_conditions_is_active ON mission_conditions(is_active);
 `)
