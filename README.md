@@ -51,19 +51,50 @@ go run ./cmd/api
 
 Сервис поднимается на `:8080`.
 
-Проверка:
+### 2.4 Запуск через Docker
 
-```bash
-curl http://localhost:8080/health
+Требуется [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows).
+
+```powershell
+cd C:\Go\Solaris-Matchmaking
+docker compose up -d --build
+docker compose run --rm seed
 ```
 
-### 2.4 Создание тестовых данных в PostgreSQL (seed)
+Проверка:
 
-После того как PostgreSQL доступен и `DATABASE_URL` задан, можно заполнить базу демонстрационными данными:
+```powershell
+Invoke-RestMethod http://localhost:8080/health
+```
+
+Остановка и удаление данных:
+
+```powershell
+docker compose down -v
+```
+
+Сервисы:
+- `db` — PostgreSQL 16 (порт 5432 на хосте);
+- `api` — HTTP API на порту 8080;
+- `seed` — однократная загрузка тестовых данных (`docker compose run --rm seed`).
+
+Переменные окружения API задаются в `docker-compose.yml` (`DATABASE_URL`, `JWT_SECRET`).
+
+### 2.5 Проверка
+
+```powershell
+Invoke-RestMethod http://localhost:8080/health
+```
+
+### 2.6 Создание тестовых данных (seed)
+
+После того как PostgreSQL доступен и `DATABASE_URL` задан (локально или через Docker), можно заполнить базу:
 
 ```bash
 go run ./cmd/seed
 ```
+
+Или в Docker: `docker compose run --rm seed`
 
 Что создается:
 - несколько игроков;
